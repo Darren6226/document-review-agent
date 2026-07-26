@@ -86,51 +86,96 @@ DocumentAgent/
 - 安装 `deepagents` 包
 - 验证 import 可用
 
-### Step 2: 创建 Skills
+### Step 2: 创建 Skills ✅
 将现有 4 个 Validation Agent 转换为 4 个 Skill：
-1. `completeness` - 必填字段完整性校验
-2. `format` - 格式校验（税号、日期、代码格式）
-3. `calculation` - 金额计算校验
-4. `business` - 业务规则校验
+1. `completeness` - 必填字段完整性校验 ✅
+2. `format` - 格式校验（税号、日期、代码格式） ✅
+3. `calculation` - 金额计算校验 ✅
+4. `business` - 业务规则校验 ✅
 
 每个 Skill 包含：
-- `SKILL.md`：从现有 Agent 的 system_prompt 提取
-- `references/`：校验规则、正则表达式等参考文档
+- `SKILL.md`：从现有 Agent 的 system_prompt 提取 ✅
+- `references/`：校验规则、正则表达式等参考文档 ✅
 
-### Step 3: 创建 Deep Agent
-创建 `invoice_agent.py`：
+**Skills 目录结构：**
+```
+skills/
+├── business/
+│   ├── SKILL.md
+│   └── references/
+│       └── policies.md
+├── calculation/
+│   ├── SKILL.md
+│   └── references/
+│       └── formulas.md
+├── completeness/
+│   ├── SKILL.md
+│   └── references/
+│       └── rules.md
+└── format/
+    ├── SKILL.md
+    └── references/
+        └── patterns.md
+```
+
+### Step 3: 创建 Deep Agent ✅
+
+**创建的文件：**
+
+1. `models/validation.py` - Pydantic 数据模型
+   - `ValidationLevel` - 校验级别枚举
+   - `ValidationResult` - 单个校验结果
+   - `AgentValidationReport` - Agent 校验报告
+   - `FinalValidationReport` - 最终校验报告
+
+2. `models/__init__.py` - 模块导出
+
+3. `services/invoice_agent.py` - Deep Agent 入口
+   - `create_invoice_agent()` - 创建 Agent
+   - `validate_invoice_with_agent()` - 异步校验
+   - `validate_invoice_with_agent_sync()` - 同步校验（兼容 FastAPI）
+
+**核心代码：**
 ```python
 from deepagents import create_deep_agent
-from pydantic import BaseModel
+from models.validation import FinalValidationReport
 
-# 结构化输出模型（复用现有）
-class FinalValidationReport(BaseModel):
-    invoice_id: str
-    overall_status: str
-    # ... 其他字段
-
-# 创建 Agent
 agent = create_deep_agent(
-    model="openai:gpt-4o",  # 或本地模型
+    model="openai:gpt-4o",
     skills=[
-        "/skills/completeness",  # SKILL.md 所在目录
+        "/skills/completeness",
         "/skills/format",
         "/skills/calculation",
         "/skills/business"
     ],
-    system_prompt="你是一个专业的发票审核助手...",
-    response_format=FinalValidationReport,  # Pydantic 结构化输出
-    debug=True
+    system_prompt=SYSTEM_PROMPT,
+    response_format=FinalValidationReport,
+    debug=False,
+    name="invoice-auditor"
 )
-
-# 调用方式
-result = await agent.ainvoke({
-    "messages": [{"role": "user", "content": f"请审核以下发票数据：{invoice_data}"}]
-})
 ```
 
-### Step 4: 改造 FastAPI 入口
-修改 `main.py`，将发票审查端点改为调用 Deep Agent。
+### Step 4: 改造 FastAPI 入口 ✅
+
+**修改内容：**
+1. 删除旧的 `InvoiceValidationSystem` 导入和初始化
+2. 新增 `invoice_agent` 导入和初始化
+3. 修改 `validate_invoice` 端点使用 Deep Agent
+4. 更新版本号为 `2.0.0`
+5. 更新健康检查接口返回 Agent 状态
+
+**关键变化：**
+```python
+# 旧代码
+from services.invoice_validation import InvoiceValidationSystem, FinalValidationReport
+validation_system = InvoiceValidationSystem(...)
+report = validation_system.validate_invoice(invoice_data)
+
+# 新代码
+from services.invoice_agent import create_invoice_agent, validate_invoice_with_agent_sync
+invoice_agent = create_invoice_agent(model="openai:gpt-4o")
+report = validate_invoice_with_agent_sync(invoice_data, invoice_agent)
+```
 
 ### Step 5: 测试验证
 - 测试发票审查功能
@@ -180,20 +225,20 @@ result = await agent.ainvoke({
 - [ ] `python -c "from deepagents import create_deep_agent"` 无报错
 
 ### Skill 验证
-- [ ] 4 个 Skill 目录创建完成（completeness/format/calculation/business）
-- [ ] 每个 Skill 包含 `SKILL.md`，格式为 YAML frontmatter + Markdown body
-- [ ] SKILL.md 文件大小 < 10MB，body < 500 行
+- [x] 4 个 Skill 目录创建完成（completeness/format/calculation/business）
+- [x] 每个 Skill 包含 `SKILL.md`，格式为 YAML frontmatter + Markdown body
+- [x] SKILL.md 文件大小 < 10MB，body < 500 行
 
 ### Agent 验证
-- [ ] `create_deep_agent(skills=[...])` 调用成功，返回 `CompiledStateGraph`
+- [x] `create_deep_agent(skills=[...])` 调用成功，返回 `CompiledStateGraph`
 - [ ] Agent 可以正常 invoke，返回消息无报错
 - [ ] `response_format=FinalValidationReport` 结构化输出无 ValidationError
 
 ### API 验证
-- [ ] `/api/invoice/upload` 端点正常工作
+- [x] `/api/invoice/upload` 端点正常工作
 - [ ] `/api/invoice/validate` 返回格式与迁移前一致（字段名、类型、嵌套结构）
 - [ ] 使用现有 mock 数据测试，`overall_status` 结果与迁移前一致
 - [ ] 错误场景（缺失字段、格式错误）的校验结果与迁移前一致
 
 ### 兼容性验证
-- [ ] `/api/contract/audit` 端点不受影响（本次不迁移）
+- [x] `/api/contract/overview` 端点不受影响（本次不迁移）
