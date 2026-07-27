@@ -200,7 +200,7 @@ class InvoiceExtractionSystem:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-       model_name: str = "Qwen/Qwen3.6-27B"
+       model_name: str = "Qwen/Qwen3-VL-32B-Instruct"
     ):
         """
         初始化提取系统
@@ -309,7 +309,7 @@ class InvoiceExtractionSystem:
         # 验证并转换
         invoice = Invoice.model_validate(raw_json)
 
-        print("✓ 发票信息提取完成")
+        print("[OK] 发票信息提取完成")
         return invoice
 
     def _extract_json(self, text: str) -> dict:
@@ -370,7 +370,7 @@ def main():
     with open("invoice_extracted.json", "w", encoding="utf-8") as f:
         f.write(invoice.to_json())
 
-    print(f"\n✓ 详细数据已保存到 invoice_extracted.json")
+    print(f"\\n[OK] 详细数据已保存到 invoice_extracted.json")
 
 
 if __name__ == "__main__":

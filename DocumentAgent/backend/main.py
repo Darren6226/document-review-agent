@@ -90,7 +90,7 @@ if API_KEY:
     try:
         extraction_system = InvoiceExtractionSystem(
             api_key=API_KEY,
-            model_name="Qwen/Qwen3.6-27B"  # 硅基流动模型
+            model_name="Qwen/Qwen3-VL-32B-Instruct"  # 视觉模型
         )
         print("发票识别系统初始化成功")
     except Exception as e:
