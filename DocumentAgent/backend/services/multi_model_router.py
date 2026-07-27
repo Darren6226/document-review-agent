@@ -92,16 +92,16 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
     ),
     
     # ===== 高性能模型（复杂核心任务）=====
-    "qwen-vl-72b": ModelConfig(
-        name="Qwen/Qwen2.5-VL-72B-Instruct",
+    "qwen-vl-32b": ModelConfig(
+        name="Qwen/Qwen3-VL-32B-Instruct",
         tier=ModelTier.PERFORMANCE,
         base_url="https://api.siliconflow.cn/v1",
         api_key_env="OPENAI_API_KEY",
         max_tokens=4000,
         temperature=0.1,
         timeout=120,
-        cost_per_1k=0.02,  # 较贵
-        avg_latency_ms=300,
+        cost_per_1k=0.015,  # 适中
+        avg_latency_ms=250,
         supports_vision=True,
         context_window=32768
     ),

@@ -39,7 +39,7 @@ backend/
 ### 1. 发票处理 (`services/invoice_verification.py`)
 - **功能**: 基于视觉大模型的发票 OCR 识别
 - **支持**: 增值税专用发票、普通发票、电子发票
-- **模型**: Qwen2.5-VL-72B-Instruct (通过硅基流动 API)
+- **模型**: Qwen3-VL-32B-Instruct (通过硅基流动 API)
 - **输入**: 发票图片 (PNG/JPG)
 - **输出**: 结构化的发票信息 (JSON)
 
@@ -49,7 +49,7 @@ from services.invoice_verification import InvoiceExtractionSystem
 
 system = InvoiceExtractionSystem(
     api_key="your-api-key",
-    model_name="Qwen/Qwen2.5-VL-72B-Instruct"
+    model_name="Qwen/Qwen3-VL-32B-Instruct"
 )
 
 invoice = system.extract_from_image("./invoice.png")
@@ -96,7 +96,7 @@ print(f"总结: {report.summary}")
   - 合同金额、币种
   - 生效日期、到期日期
   - 关键条款摘要
-- **模型**: Qwen2.5-VL-72B-Instruct
+- **模型**: Qwen3-VL-32B-Instruct
 
 **使用示例**:
 ```python
@@ -124,7 +124,7 @@ from prompts import create_professional_contract_audit_prompt, AuditResult
 from langchain_openai import ChatOpenAI
 
 prompt = create_professional_contract_audit_prompt()
-llm = ChatOpenAI(model="Qwen/Qwen2.5-VL-72B-Instruct", temperature=0.1)
+llm = ChatOpenAI(model="Qwen/Qwen3-VL-32B-Instruct", temperature=0.1)
 
 structured_llm = llm.with_structured_output(AuditResult)
 audit_chain = prompt | structured_llm
