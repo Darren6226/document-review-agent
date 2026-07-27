@@ -1,6 +1,6 @@
 # 文档审核后端服务
 
-基于 FastAPI + LangChain 的文档审核系统后端，支持发票和合同的智能识别与审查。
+基于 FastAPI + Deep Agents 的文档审核系统后端，支持发票和合同的智能识别与审查。
 
 ## 📁 目录结构
 
@@ -14,8 +14,18 @@ backend/
 ├── services/                       # 业务服务层
 │   ├── __init__.py
 │   ├── invoice_verification.py     # 发票 OCR 识别与提取
-│   ├── invoice_validation.py       # 发票智能校验 (多 Agent 协作)
+│   ├── invoice_agent.py            # 发票智能校验 (Deep Agent + Skills)
 │   └── contract_extraction.py      # 合同关键信息提取
+│
+├── models/                         # 数据模型
+│   ├── __init__.py
+│   └── validation.py               # 校验结果 Pydantic 模型
+│
+├── skills/                         # Deep Agent Skills
+│   ├── completeness/               # 完整性校验技能
+│   ├── format/                     # 格式校验技能
+│   ├── calculation/                # 计算校验技能
+│   └── business/                   # 业务规则校验技能
 │
 ├── prompts/                        # 提示词模板
 │   ├── __init__.py
@@ -46,27 +56,37 @@ invoice = system.extract_from_image("./invoice.png")
 print(invoice.to_json())
 ```
 
-### 2. 发票校验 (`services/invoice_validation.py`)
-- **功能**: 多 Agent 协作的发票智能校验
-- **校验维度**:
+### 2. 发票校验 (`services/invoice_agent.py`)
+- **功能**: 基于 Deep Agents + Skills 机制的发票智能校验
+- **框架**: [Deep Agents](https://github.com/langchain-ai/deep-agents) (v0.4.12)
+- **校验维度** (通过 Skills 实现):
   - 完整性校验：验证必填字段
   - 格式校验：验证发票代码、号码、税号格式
   - 计算校验：验证金额、税额计算
   - 业务规则校验：验证税率、日期等逻辑
-- **输出**: 详细的校验报告 (包含错误、警告、信息)
+- **输出**: 结构化校验报告 (`FinalValidationReport`)
 
 **使用示例**:
 ```python
-from services.invoice_validation import InvoiceValidationSystem
+from services.invoice_agent import create_invoice_agent, validate_invoice_with_agent_sync
 
-system = InvoiceValidationSystem(
-    api_key="your-api-key",
-    enable_llm_validation=True  # 启用 AI 深度校验
+# 创建 Agent（传入 ChatOpenAI 实例避免 event loop 冲突）
+agent = create_invoice_agent(
+    model="Qwen/Qwen3.6-27B",
+    debug=False
 )
 
-report = system.validate_invoice(invoice_data)
-system.print_report(report)
+# 执行校验
+report = validate_invoice_with_agent_sync(invoice_data, agent)
+print(f"状态: {report.overall_status}")
+print(f"总结: {report.summary}")
 ```
+
+**Skills 机制**:
+- 每个校验维度对应一个 Skill 目录 (`skills/<name>/`)
+- `SKILL.md`：YAML frontmatter + Markdown 描述
+- `references/`：参考资料文档
+- Deep Agent 自动加载并调用相关 Skill
 
 ### 3. 合同信息提取 (`services/contract_extraction.py`)
 - **功能**: 从合同文本中提取关键信息
@@ -140,7 +160,7 @@ MINERU_BASE_URL=https://mineru.net
 
 3. **验证配置**:
 ```bash
-python test_imports.py
+python -c "from services.invoice_agent import create_invoice_agent; print('OK')"
 ```
 
 ### 详细说明
@@ -153,7 +173,7 @@ python test_imports.py
 
 | 服务商 | 用途 | 推荐模型 |
 |--------|------|----------|
-| 硅基流动 | LLM 调用 | `Qwen/Qwen2.5-VL-72B-Instruct` |
+| 硅基流动 | LLM 调用 | `Qwen/Qwen3.6-27B` |
 | 阿里云 DashScope | 备选方案 | `qwen-vl-max` |
 | MinerU | PDF 解析 | - |
 
@@ -164,10 +184,10 @@ python test_imports.py
 启动服务后访问 `http://localhost:8000/docs` 查看完整的 API 文档。
 
 **主要端点**:
-- `POST /api/ocr/upload` - 上传票据图片进行 OCR 识别
-- `POST /api/validation/validate` - 执行发票校验
-- `POST /api/contract/review` - 合同审查
-- `GET /api/contracts/{id}/info` - 获取合同信息
+- `POST /api/invoice/upload` - 上传发票图片进行 OCR 识别
+- `POST /api/invoice/validate` - 执行发票校验 (Deep Agent)
+- `POST /api/contract/overview` - 合同关键信息提取
+- `GET /api/health` - 健康检查
 
 ## 📦 安装依赖
 
@@ -178,6 +198,7 @@ pip install -r requirements.txt
 **核心依赖**:
 - `fastapi` - Web 框架
 - `uvicorn` - ASGI 服务器
+- `deepagents` - Deep Agents 框架 (v0.4.12+)
 - `langchain` - LLM 应用框架
 - `langchain_openai` - OpenAI API 兼容客户端
 - `pydantic` - 数据验证
@@ -195,8 +216,6 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ## 🧪 测试模块
 
-每个服务模块都包含测试代码，可以直接运行:
-
 ```bash
 # 测试发票识别
 python services/invoice_verification.py
@@ -204,20 +223,22 @@ python services/invoice_verification.py
 # 测试合同信息提取
 python services/contract_extraction.py
 
-# 测试发票校验
-python services/invoice_validation.py
+# 测试发票校验 (Deep Agent)
+python services/invoice_agent.py
 ```
 
 ## 📝 注意事项
 
 1. **API密钥安全**: 不要将 `.env` 文件提交到 Git
 2. **跨平台路径**: 所有文件路径使用 `pathlib.Path` 确保跨平台兼容
-3. **超时设置**: LLM 调用设置了 120 秒超时，防止无限等待
+3. **超时设置**: Deep Agent 调用可能需要 2-3 分钟，请耐心等待
 4. **错误处理**: 所有外部调用都包含异常捕获和友好提示
 5. **日志输出**: 关键操作都有详细的调试日志
+6. **Event Loop**: FastAPI 使用 `def` 端点避免与 Deep Agent 的 event loop 冲突
 
 ## 🔗 相关文档
 
+- [Deep Agents 官方文档](https://github.com/langchain-ai/deep-agents)
 - [部署指南](../DEPLOYMENT_GUIDE.md)
 - [前端文档](../frontend/README.md)
 - [快速开始](../frontend/QUICKSTART.md)
