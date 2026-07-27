@@ -10,10 +10,12 @@ import sys
 import json
 import uuid
 import shutil
+import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any
 from pathlib import Path
 from fastapi import Form
+
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -99,7 +101,7 @@ else:
 # 创建 Deep Agent
 try:
     invoice_agent = create_invoice_agent(
-        model="openai:gpt-4o",  # 可根据需要切换模型
+        model="Qwen/Qwen3.6-27B",  # 使用硅基流动模型
         debug=False
     )
     print("Deep Agent 初始化成功")
@@ -204,7 +206,7 @@ async def upload_invoice(file: UploadFile = File(...)):
 
 
 @app.post("/api/invoice/validate", response_model=ValidationResponse)
-async def validate_invoice(request: ValidationRequest):
+def validate_invoice(request: ValidationRequest):
     """
     执行发票审查（基于 Deep Agents）
 
@@ -222,7 +224,7 @@ async def validate_invoice(request: ValidationRequest):
                 report=_get_mock_validation_report(invoice_data)
             )
 
-        # 使用 Deep Agent 执行校验
+        # 使用 Deep Agent 执行校验（同步版本，def 端点在独立线程中运行，直接创建新 event loop）
         print(f"正在审查发票: {request.invoice_id}")
         report = validate_invoice_with_agent_sync(invoice_data, invoice_agent)
 

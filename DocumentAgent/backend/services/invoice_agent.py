@@ -11,6 +11,10 @@ from datetime import datetime
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 加载环境变量
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
+
 from deepagents import create_deep_agent
 from langchain_openai import ChatOpenAI
 
@@ -67,7 +71,7 @@ SYSTEM_PROMPT = """你是一个专业的中国增值税发票审核助手。
 # ==================== Deep Agent 创建 ====================
 
 def create_invoice_agent(
-    model: str = "openai:gpt-4o",
+    model: str = None,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     debug: bool = False
@@ -76,26 +80,33 @@ def create_invoice_agent(
     创建发票审核 Deep Agent
 
     Args:
-        model: 模型名称，格式为 "provider:model"
-               - "openai:gpt-4o" (默认)
-               - "openai:gpt-3.5-turbo"
-               - "anthropic:claude-3-sonnet"
+        model: 模型名称（如 "Qwen/Qwen3.6-27B"）
         api_key: API 密钥（可选，默认从环境变量读取）
-        base_url: API 基础 URL（可选）
+        base_url: API 基础 URL（可选，默认从环境变量读取）
         debug: 是否启用调试模式
 
     Returns:
         CompiledStateGraph: 配置好的 Deep Agent
     """
-    # 如果指定了 api_key，设置环境变量
-    if api_key:
-        os.environ["OPENAI_API_KEY"] = api_key
-    if base_url:
-        os.environ["OPENAI_API_BASE"] = base_url
+    # 读取配置
+    if api_key is None:
+        api_key = os.getenv("OPENAI_API_KEY", "")
+    if base_url is None:
+        base_url = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
+    if model is None:
+        model = "Qwen/Qwen3.6-27B"
 
-    # 创建 Agent
-    agent = create_deep_agent(
+    # 直接创建 ChatOpenAI 实例，使用标准 chat.completions API
+    llm = ChatOpenAI(
         model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=0
+    )
+
+    # 创建 Agent，传入 llm 实例而非字符串
+    agent = create_deep_agent(
+        model=llm,
         skills=SKILL_PATHS,
         system_prompt=SYSTEM_PROMPT,
         response_format=FinalValidationReport,
@@ -108,80 +119,15 @@ def create_invoice_agent(
 
 # ==================== 校验执行函数 ====================
 
-async def validate_invoice_with_agent(
-    invoice_data: dict,
-    agent=None,
-    model: str = "openai:gpt-4o"
-) -> FinalValidationReport:
-    """
-    使用 Deep Agent 执行发票校验
-
-    Args:
-        invoice_data: 发票数据字典
-        agent: 预创建的 Agent（可选，如果不提供则自动创建）
-        model: 模型名称（仅在 agent 为 None 时使用）
-
-    Returns:
-        FinalValidationReport: 校验报告
-    """
-    # 如果没有提供 Agent，创建一个新的
-    if agent is None:
-        agent = create_invoice_agent(model=model)
-
-    # 构建用户消息
-    import json
-    user_message = f"""请审核以下发票数据：
-
-```json
-{json.dumps(invoice_data, ensure_ascii=False, indent=2)}
-```
-
-请执行完整性、格式、计算和业务规则校验，并输出 FinalValidationReport 格式的结果。
-"""
-
-    # 调用 Agent
-    result = await agent.ainvoke({
-        "messages": [{"role": "user", "content": user_message}]
-    })
-
-    # 解析结果
-    # Deep Agent 的返回格式包含 messages 列表
-    if "structured_response" in result:
-        # 如果有结构化响应，直接使用
-        return result["structured_response"]
-    else:
-        # 从消息中提取内容
-        last_message = result["messages"][-1]
-        content = last_message.content
-
-        # 尝试解析 JSON
-        import re
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            try:
-                report_data = json.loads(json_match.group(0))
-                return FinalValidationReport(**report_data)
-            except Exception as e:
-                print(f"解析报告失败: {e}")
-
-        # 如果解析失败，返回默认报告
-        return FinalValidationReport(
-            invoice_id=f"{invoice_data.get('invoice_code', 'N/A')}_{invoice_data.get('invoice_number', 'N/A')}",
-            validation_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            overall_status="ERROR",
-            summary=f"Agent 返回结果解析失败: {content[:200]}..."
-        )
-
-
-# ==================== 同步版本（兼容现有代码） ====================
-
 def validate_invoice_with_agent_sync(
     invoice_data: dict,
     agent=None,
-    model: str = "openai:gpt-4o"
+    model: str = None
 ) -> FinalValidationReport:
     """
-    同步版本的发票校验（兼容现有 FastAPI 代码）
+    同步版本的发票校验 - 在新的 event loop 中运行
+
+    注意：此函数应通过 asyncio.to_thread() 调用以避免 event loop 冲突
 
     Args:
         invoice_data: 发票数据字典
@@ -193,20 +139,70 @@ def validate_invoice_with_agent_sync(
     """
     import asyncio
 
-    # 获取或创建事件循环
+    # 创建新的 event loop 执行异步调用（不设置为当前线程的 loop，避免冲突）
+    loop = asyncio.new_event_loop()
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(
+            _invoke_agent(agent, invoice_data, model)
+        )
+    finally:
+        loop.close()
 
-    # 执行异步函数
-    return loop.run_until_complete(
-        validate_invoice_with_agent(invoice_data, agent, model)
-    )
+
+async def _invoke_agent(agent, invoice_data: dict, model: str = None):
+    """异步调用 Agent"""
+    import json
+
+    # 如果没有提供 Agent，创建一个新的
+    if agent is None:
+        agent = create_invoice_agent(model=model)
+
+    # 构建用户消息
+    user_message = f"""请审核以下发票数据：
+
+```json
+{json.dumps(invoice_data, ensure_ascii=False, indent=2)}
+```
+
+请执行完整性、格式、计算和业务规则校验，并输出 FinalValidationReport 格式的结果。
+"""
+
+    # 调用 Agent
+    try:
+        result = await agent.ainvoke({
+            "messages": [{"role": "user", "content": user_message}]
+        })
+    except Exception as e:
+        print(f"Agent 调用失败: {e}")
+        return FinalValidationReport(
+            invoice_id=f"{invoice_data.get('invoice_code', 'N/A')}_{invoice_data.get('invoice_number', 'N/A')}",
+            validation_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            overall_status="ERROR",
+            summary=f"Agent 调用失败: {str(e)[:200]}"
+        )
+
+    # 解析结果
+    if "structured_response" in result:
+        return result["structured_response"]
+    else:
+        last_message = result["messages"][-1]
+        content = last_message.content if hasattr(last_message, 'content') else str(last_message)
+
+        import re
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            try:
+                report_data = json.loads(json_match.group(0))
+                return FinalValidationReport(**report_data)
+            except Exception as e:
+                print(f"解析报告失败: {e}")
+
+        return FinalValidationReport(
+            invoice_id=f"{invoice_data.get('invoice_code', 'N/A')}_{invoice_data.get('invoice_number', 'N/A')}",
+            validation_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            overall_status="ERROR",
+            summary=f"Agent 返回结果解析失败: {content[:200]}..."
+        )
 
 
 # ==================== 测试代码 ====================
@@ -236,7 +232,7 @@ if __name__ == "__main__":
 
     # 创建 Agent
     print("\n创建 Agent...")
-    agent = create_invoice_agent(model="openai:gpt-4o", debug=True)
+    agent = create_invoice_agent(model="openai:Qwen/Qwen3.6-27B", debug=True)
     print("Agent 创建成功!")
 
     # 执行校验
