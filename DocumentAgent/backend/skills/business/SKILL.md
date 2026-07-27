@@ -25,14 +25,15 @@ VALID_TAX_RATES = [0.00, 0.01, 0.03, 0.05, 0.06, 0.09, 0.13]
 
 ### 2. 发票类型与字段匹配校验
 
-**专用发票额外要求**：
-- 必须有 `purchaser_tax_id`（购买方纳税人识别号）→ ERROR
-- 必须有 `payee`（收款人）→ ERROR
-- 必须有 `drawer`（开票人）→ ERROR
+**职责边界**：字段必填性（如 `purchaser_tax_id`、`payee`、`drawer` 是否存在）由 `completeness` Skill 负责，本 Skill **不再重复判定**。
+
+**业务层面的类型匹配**：
+- 当 `invoice_type` 含"专用"时，若 `purchaser_tax_id` 与 `seller_tax_id` 相同（买卖双方为同一主体）→ WARNING（虚开发票高风险）
 
 **判断逻辑**：
 ```python
 is_special = '专用' in invoice_type
+same_party = is_special and purchaser_tax_id == seller_tax_id
 ```
 
 ### 3. 金额合理性校验
