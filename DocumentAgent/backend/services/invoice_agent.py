@@ -25,6 +25,8 @@ from models.validation import (
     ValidationLevel
 )
 
+from tools.invoice_tools import verify_invoice_calculation
+
 
 # ==================== Skills 路径配置 ====================
 
@@ -108,6 +110,7 @@ def create_invoice_agent(
     # 创建 Agent，传入 llm 实例而非字符串
     agent = create_deep_agent(
         model=llm,
+        tools=[verify_invoice_calculation],
         skills=SKILL_PATHS,
         system_prompt=SYSTEM_PROMPT,
         response_format=FinalValidationReport,

@@ -19,6 +19,13 @@ description: 发票计算校验 - 验证金额、税额、价税合计计算是�
 
 ## 校验规则
 
+> **必须使用 `verify_invoice_calculation` 工具**获取确定性计算结果，再将每条结果映射为本 Skill 输出格式：
+> - `status=PASS` → INFO（校验通过）
+> - `status=FAIL` → 按结果中的 `level`（ERROR 或 WARNING）
+> - `status=SKIP` → INFO（前置字段缺失，已在完整性/格式维度报错，不重复告警）
+>
+> **禁止 LLM 自行心算**。下方公式为工具内部逻辑说明，仅供参考。
+
 ### 1. 价税合计校验
 
 **公式**: `合计金额 + 合计税额 = 价税合计`
