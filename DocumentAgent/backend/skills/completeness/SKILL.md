@@ -60,6 +60,8 @@ description: 发票完整性校验 - 验证必填字段和建议字段是否完�
     "category": "完整性校验",
     "message": "必填字段 [字段名] 缺失",
     "field": "字段名",
+    "expected": "期望情况（如：字段存在）",
+    "actual": "实际情况（如：字段缺失）",
     "suggestion": "建议内容"
 }
 ```
