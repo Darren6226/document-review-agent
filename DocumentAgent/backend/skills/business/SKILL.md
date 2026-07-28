@@ -9,6 +9,12 @@ description: 发票业务规则校验 - 验证税率、日期、发票类型等�
 
 验证发票的业务逻辑规则，包括税率合规性、发票类型与字段匹配、金额合理性等。
 
+## 前置依赖与降级
+
+- 本 Skill 依赖 `tax_rate / invoice_type / purchaser_tax_id / seller_tax_id / total_amount_with_tax` 等字段**存在且格式正确**。
+- 若前置字段缺失（应由 `completeness` 判 ERROR），**跳过对应业务项**，仅输出一条 INFO："因前置字段缺失，未执行[具体项]业务校验"，**不得重复报 ERROR**。
+- 目的：避免与 `completeness` 产生重复告警；仅当字段存在时才做业务判断。
+
 ## 校验规则
 
 ### 1. 税率合规性校验

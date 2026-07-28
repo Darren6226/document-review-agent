@@ -11,6 +11,12 @@ description: 发票计算校验 - 验证金额、税额、价税合计计算是�
 
 > 职责边界：本 Skill 仅做算术勾稽（金额/税额/价税合计的加减与单项税额）。**税率合规性、金额范围合理性由 `business` Skill 负责**，避免重复校验。
 
+## 前置依赖与降级
+
+- 本 Skill 依赖 `amount / tax / total_amount / total_amount_with_tax / tax_rate / line_items` 等字段**存在且为数字**。
+- 若某字段缺失或非数字（应由 `completeness` / `format` 判 ERROR），**跳过对应勾稽项**，仅输出一条 INFO："因前置字段缺失或格式异常，未执行[具体项]计算校验"，**不得重复报 ERROR/WARNING**。
+- 目的：避免与 `completeness` / `format` 产生重复告警。
+
 ## 校验规则
 
 ### 1. 价税合计校验
