@@ -344,10 +344,10 @@ class InvoiceExtractionSystem:
 def main():
     """使用示例"""
 
-    # 初始化系统
+    # 初始化系统（使用视觉模型识别发票图片）
     system = InvoiceExtractionSystem(
         api_key=os.getenv("OPENAI_API_KEY", "your-api-key"),
-        model_name="Qwen/Qwen3.6-27B"
+        model_name="Qwen/Qwen3-VL-32B-Instruct"
     )
 
     # 从图片提取

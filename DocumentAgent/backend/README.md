@@ -15,7 +15,14 @@ backend/
 │   ├── __init__.py
 │   ├── invoice_verification.py     # 发票 OCR 识别与提取
 │   ├── invoice_agent.py            # 发票智能校验 (Deep Agent + Skills)
-│   └── contract_extraction.py      # 合同关键信息提取
+│   ├── contract_extraction.py      # 合同概览信息提取 (/api/contract/overview)
+│   ├── contract_agent.py           # 合同审核 Agent (Deep Agent + 验证回路)
+│   ├── contract_classifier.py      # 合同类型识别
+│   └── contract_deterministic.py   # 合同确定性审核管线
+│
+├── tools/                          # 工具层
+│   ├── invoice_tools.py            # 发票计算校验工具
+│   └── contract_tools.py           # 合同审核工具
 │
 ├── models/                         # 数据模型
 │   ├── __init__.py
@@ -88,8 +95,8 @@ print(f"总结: {report.summary}")
 - `references/`：参考资料文档
 - Deep Agent 自动加载并调用相关 Skill
 
-### 3. 合同信息提取 (`services/contract_extraction.py`)
-- **功能**: 从合同文本中提取关键信息
+### 3. 合同概览提取 (`services/contract_extraction.py`)
+- **功能**: 从合同文本/Markdown 中提取概览信息，服务于 `POST /api/contract/overview`
 - **提取内容**:
   - 合同类型、标题
   - 甲方、乙方信息
@@ -107,7 +114,26 @@ print(result['party_a'])  # 甲方
 print(result['total_amount'])  # 金额
 ```
 
-### 4. 合同审核提示词 (`prompts/contract_audit_prompt.py`)
+### 4. 合同审核 (`services/contract_agent.py`)
+- **功能**: 基于 Deep Agents + 确定性管线 + 双向验证回路的专业合同审核，服务于 `POST /api/contract/audit`
+- **当前架构**（已迁移至 Deep Agents）:
+  - `contract_classifier.py`：轻量 LLM 合同类型识别
+  - `contract_deterministic.py`：确定性审核管线（金额/日期/条款/甲乙方，**零 LLM 调用**）
+  - `tools/contract_tools.py`：审核工具集
+  - `skills/contract_audit/`：合同审核 Skill（SKILL.md + references）
+  - `contract_agent.py`：Deep Agent 编排 + 验证回路（查幻觉 + 查遗漏）
+- **输出**: 结构化审核报告 (`ContractAuditReport`，含风险等级与验证结论)
+
+**使用示例**:
+```python
+from services.contract_agent import audit_contract_with_agent_sync
+
+report = audit_contract_with_agent_sync(markdown_text)
+print(f"风险等级: {report.overall_risk_level}")
+print(f"总结: {report.summary}")
+```
+
+### 5. 合同审核提示词 (`prompts/contract_audit_prompt.py`)
 - **功能**: 提供专业的合同审核提示词模板
 - **审核规则**:
   - 文本规范性（错别字、标点、语法）
@@ -167,7 +193,7 @@ python -c "from services.invoice_agent import create_invoice_agent; print('OK')"
 
 - 📄 **`.env.example`**: 配置模板（可提交到 Git）
 - 🔐 **`.env`**: 实际配置（**禁止提交**，已添加到 `.gitignore`）
-- 📚 **完整指南**: 查看项目根目录的 [`API_KEY_SETUP.md`](../API_KEY_SETUP.md)
+- 📚 **完整配置说明**: 见本文件上方「API 配置」章节
 
 ### 支持的 AI 服务商
 
@@ -186,7 +212,7 @@ python -c "from services.invoice_agent import create_invoice_agent; print('OK')"
 **主要端点**:
 - `POST /api/invoice/upload` - 上传发票图片进行 OCR 识别
 - `POST /api/invoice/validate` - 执行发票校验 (Deep Agent)
-- `POST /api/contract/overview` - 合同关键信息提取
+- `POST /api/contract/overview` - 合同概览提取
 - `GET /api/health` - 健康检查
 
 ## 📦 安装依赖
@@ -220,7 +246,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 # 测试发票识别
 python services/invoice_verification.py
 
-# 测试合同信息提取
+# 测试合同概览提取
 python services/contract_extraction.py
 
 # 测试发票校验 (Deep Agent)
@@ -239,6 +265,5 @@ python services/invoice_agent.py
 ## 🔗 相关文档
 
 - [Deep Agents 官方文档](https://github.com/langchain-ai/deep-agents)
-- [部署指南](../DEPLOYMENT_GUIDE.md)
 - [前端文档](../frontend/README.md)
 - [快速开始](../frontend/QUICKSTART.md)

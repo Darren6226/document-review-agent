@@ -21,6 +21,7 @@ import {
 export default function App() {
   const [activeMenu, setActiveMenu] = useState('票据审查');
   const [uploadedDocument, setUploadedDocument] = useState<string | null>(null);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [ocrData, setOcrData] = useState<InvoiceData | null>(null);
   const [contractData, setContractData] = useState<ContractOverview | null>(null);
   const [invoiceId, setInvoiceId] = useState<string | null>(null);
@@ -36,6 +37,7 @@ export default function App() {
     setIsProcessing(true);
     setSidebarCollapsed(true);
     setError(null);
+    setUploadedFile(file);
 
     try {
       // 创建预览URL
@@ -78,6 +80,7 @@ export default function App() {
       setError(err instanceof Error ? err.message : '上传失败');
       // 如果失败,重置状态
       setUploadedDocument(null);
+      setUploadedFile(null);
       setSidebarCollapsed(false);
     } finally {
       setIsProcessing(false);
@@ -118,10 +121,10 @@ export default function App() {
     }
   };
 
-  const handleStartContractReview = async () => {
-    // 合同审查：调用后端API进行真实审查
-    if (!contractData || !contractData.contract_id) {
-      setError('请先上传并识别合同');
+  const handleStartContractReview = async (selectedRuleIds?: string[]) => {
+    // 合同审查：用保留的原始文件调用后端审核端点（重新上传文件）
+    if (!uploadedFile) {
+      setError('请先上传合同文件');
       return;
     }
 
@@ -129,8 +132,8 @@ export default function App() {
     setError(null);
 
     try {
-      // 调用后端API进行审查
-      const response = await auditContract(contractData.contract_id);
+      // 调用后端API进行审查（重新上传文件，传入选中的规则ID列表）
+      const response = await auditContract(uploadedFile, selectedRuleIds);
 
       if (response.success && response.data) {
         setContractAuditResult(response.data);
@@ -148,6 +151,7 @@ export default function App() {
 
   const handleReset = () => {
     setUploadedDocument(null);
+    setUploadedFile(null);
     setOcrData(null);
     setContractData(null);
     setInvoiceId(null);
@@ -172,9 +176,13 @@ export default function App() {
         {/* 头部 */}
         <div className="glass-effect-dark border-b border-white/50 px-6 py-4 flex items-center justify-between shadow-premium">
           <div className="flex items-center gap-2">
-            <button 
+            <button
               onClick={() => setShowHistory(true)}
-              className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/60 rounded-lg transition-all duration-300 text-gray-700 hover:shadow-md"
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all duration-300 ${
+                showHistory
+                  ? 'bg-blue-100 text-blue-700 shadow-md'
+                  : 'text-gray-700 hover:bg-white/60 hover:shadow-md'
+              }`}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -182,9 +190,7 @@ export default function App() {
               <span className="text-sm">历史记录</span>
             </button>
           </div>
-          <button className="px-4 py-2 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white rounded-lg hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 transition-all duration-300 shadow-lg hover:shadow-xl hover:scale-105 animate-gradient text-sm">
-            ✨ 课程优惠
-          </button>
+
         </div>
 
         {/* 主内容区 */}
@@ -214,7 +220,14 @@ export default function App() {
             </div>
           )}
 
-          {!uploadedDocument && !showReviewResults ? (
+          {showHistory ? (
+            <div className="h-full p-6">
+              <HistoryPanel
+                embedded
+                onClose={() => setShowHistory(false)}
+              />
+            </div>
+          ) : !uploadedDocument && !showReviewResults ? (
             <DocumentUpload onUpload={handleDocumentUpload} activeMenu={activeMenu} />
           ) : showReviewResults ? (
             activeMenu === '合同审查' ? (
@@ -232,6 +245,7 @@ export default function App() {
                 imageUrl={uploadedDocument!}
                 onStartReview={handleStartReview}
                 isProcessing={isProcessing}
+                activeMenu={activeMenu}
               />
               <OCRResults
                 data={ocrData}
@@ -245,8 +259,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* 历史记录面板 */}
-      {showHistory && <HistoryPanel onClose={() => setShowHistory(false)} />}
     </div>
   );
 }

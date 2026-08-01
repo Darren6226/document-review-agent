@@ -12,7 +12,7 @@ import uuid
 import shutil
 import asyncio
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 from fastapi import Form
 
@@ -31,6 +31,11 @@ from services.invoice_agent import create_invoice_agent, validate_invoice_with_a
 
 # 导入合同审查模块
 from services.contract_extraction import extract_contract_info_dict, ContractOverview
+from services.contract_agent import audit_contract_with_agent_sync
+from models.validation import ContractAuditReport
+
+# 导入历史记录存储模块
+from services.history_store import save_record, load_records
 
 # ==================== 配置 ====================
 
@@ -94,9 +99,9 @@ if API_KEY:
         )
         print("发票识别系统初始化成功")
     except Exception as e:
-        print(f"系统初始化警告：{e}")
+        print(f"[ERROR] 发票识别系统初始化失败：{e}（/api/invoice/upload 将返回 503）")
 else:
-    print("未设置 OPENAI_API_KEY 环境变量")
+    print("[WARN] 未设置 OPENAI_API_KEY 环境变量（/api/invoice/upload 将返回 503）")
 
 # 创建 Deep Agent
 try:
@@ -106,7 +111,7 @@ try:
     )
     print("Deep Agent 初始化成功")
 except Exception as e:
-    print(f"Deep Agent 初始化警告：{e}")
+    print(f"[ERROR] Deep Agent 初始化失败：{e}（/api/invoice/validate 将返回 503）")
 
 
 # ==================== API 端点 ====================
@@ -146,6 +151,7 @@ async def upload_invoice(file: UploadFile = File(...)):
 
     支持格式: PNG, JPG, JPEG, PDF
     """
+    file_path: Optional[Path] = None
     try:
         # 验证文件类型
         if not file.content_type or not file.content_type.startswith(('image/', 'application/pdf')):
@@ -170,12 +176,9 @@ async def upload_invoice(file: UploadFile = File(...)):
 
         # 检查系统是否初始化
         if not extraction_system:
-            # 返回模拟数据用于测试
-            return OCRResponse(
-                success=True,
-                message="OCR识别完成(测试模式)",
-                data=_get_mock_invoice_data(),
-                invoice_id=str(uuid.uuid4())
+            raise HTTPException(
+                status_code=503,
+                detail="发票识别系统未初始化：请检查 OPENAI_API_KEY 环境变量是否正确配置"
             )
 
         # 执行OCR识别
@@ -203,6 +206,13 @@ async def upload_invoice(file: UploadFile = File(...)):
     except Exception as e:
         print(f"OCR识别错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"OCR识别失败: {str(e)}")
+    finally:
+        # 清理上传的临时文件（OCR 已完成或异常时）
+        if file_path is not None and file_path.exists():
+            try:
+                file_path.unlink()
+            except Exception:
+                pass
 
 
 @app.post("/api/invoice/validate", response_model=ValidationResponse)
@@ -217,11 +227,9 @@ def validate_invoice(request: ValidationRequest):
 
         # 检查 Agent 是否初始化
         if not invoice_agent:
-            # 返回模拟审查结果
-            return ValidationResponse(
-                success=True,
-                message="审查完成(测试模式)",
-                report=_get_mock_validation_report(invoice_data)
+            raise HTTPException(
+                status_code=503,
+                detail="发票审查 Agent 未初始化：请检查 OPENAI_API_KEY 及模型配置是否正确"
             )
 
         # 使用 Deep Agent 执行校验（同步版本，def 端点在独立线程中运行，直接创建新 event loop）
@@ -230,6 +238,21 @@ def validate_invoice(request: ValidationRequest):
 
         # 转换为字典
         report_data = report.model_dump(exclude_none=False)
+
+        # 保存历史记录
+        try:
+            save_record({
+                "id": str(uuid.uuid4()),
+                "type": "票据审查",
+                "title": request.invoice_id or "发票",
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "status": "已完成",
+                "summary": report_data.get("summary", ""),
+                "risk_level": report_data.get("overall_status", "PASSED"),
+                "detail": report_data,
+            })
+        except Exception as e:
+            print(f"[WARN] 保存发票审查历史失败：{e}")
 
         return ValidationResponse(
             success=True,
@@ -242,135 +265,6 @@ def validate_invoice(request: ValidationRequest):
         raise HTTPException(status_code=500, detail=f"审查失败: {str(e)}")
 
 
-# ==================== 模拟数据(用于测试) ====================
-
-def _get_mock_invoice_data() -> Dict[str, Any]:
-    """获取模拟发票数据"""
-    return {
-        "invoice_type": "增值税专用发票",
-        "province": "上海",
-        "invoice_code": "3100153130",
-        "invoice_number": "14641426",
-        "issue_date": "2016-06-02",
-        "check_code": "",
-        "purchaser_name": "百度时代网络技术(北京)有限公司",
-        "purchaser_tax_id": "110108787751579",
-        "purchaser_address": "北京市海淀区上地十街10号 010-59928888",
-        "purchaser_bank": "招商银行股份有限公司北京上地支行 110920357610301",
-        "seller_name": "上海爱信诺航天信息有限公司",
-        "seller_tax_id": "310115687812026",
-        "seller_address": "上海市浦东新区龙阳路2345号 021-50277777",
-        "seller_bank": "中国工商银行上海市杨浦支行 1001241019000053363",
-        "total_amount": 12580.00,
-        "total_tax": 754.80,
-        "total_amount_with_tax": 13334.80,
-        "amount_in_words": "壹万叁仟叁佰叁拾肆元捌角整",
-        "line_items": [
-            {
-                "row": "1",
-                "name": "*信息技术服务*技术服务费",
-                "specification": None,
-                "unit": None,
-                "quantity": None,
-                "unit_price": None,
-                "amount": 12580.00,
-                "tax_rate": 0.06,
-                "tax_amount": 754.80
-            }
-        ],
-        "payee": "张三",
-        "checker": "李四",
-        "drawer": "王五",
-        "remarks": ""
-    }
-
-
-def _get_mock_validation_report(invoice_data: Dict[str, Any]) -> Dict[str, Any]:
-    """获取模拟审查报告"""
-    return {
-        "invoice_id": f"{invoice_data.get('invoice_code', 'N/A')}_{invoice_data.get('invoice_number', 'N/A')}",
-        "validation_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        "overall_status": "PASSED",
-        "summary": "发票校验完全通过,未发现任何问题",
-        "agent_reports": [
-            {
-                "agent_name": "完整性校验Agent",
-                "execution_time": 0.05,
-                "results": [
-                    {
-                        "agent_name": "完整性校验Agent",
-                        "level": "info",
-                        "category": "完整性校验",
-                        "message": "所有 13 个必填字段完整",
-                        "field": None,
-                        "expected": None,
-                        "actual": None,
-                        "suggestion": "专用发票核心信息齐全"
-                    }
-                ]
-            },
-            {
-                "agent_name": "格式校验Agent",
-                "execution_time": 0.03,
-                "results": [
-                    {
-                        "agent_name": "格式校验Agent",
-                        "level": "info",
-                        "category": "格式校验",
-                        "message": "发票代码格式正确",
-                        "field": "invoice_code",
-                        "expected": None,
-                        "actual": invoice_data.get('invoice_code'),
-                        "suggestion": None
-                    },
-                    {
-                        "agent_name": "格式校验Agent",
-                        "level": "info",
-                        "category": "格式校验",
-                        "message": "发票号码格式正确",
-                        "field": "invoice_number",
-                        "expected": None,
-                        "actual": invoice_data.get('invoice_number'),
-                        "suggestion": None
-                    }
-                ]
-            },
-            {
-                "agent_name": "计算校验Agent",
-                "execution_time": 0.02,
-                "results": [
-                    {
-                        "agent_name": "计算校验Agent",
-                        "level": "info",
-                        "category": "计算校验",
-                        "message": f"价税合计计算正确: {invoice_data.get('total_amount', 0):.2f} + {invoice_data.get('total_tax', 0):.2f} = {invoice_data.get('total_amount_with_tax', 0):.2f}",
-                        "field": "total_amount_with_tax",
-                        "expected": None,
-                        "actual": None,
-                        "suggestion": None
-                    }
-                ]
-            },
-            {
-                "agent_name": "业务规则校验Agent",
-                "execution_time": 0.01,
-                "results": [
-                    {
-                        "agent_name": "业务规则校验Agent",
-                        "level": "info",
-                        "category": "业务规则校验",
-                        "message": "未发现明显的业务逻辑问题",
-                        "field": None,
-                        "expected": None,
-                        "actual": None,
-                        "suggestion": None
-                    }
-                ]
-            }
-        ]
-    }
-
-
 # ==================== 合同审查 API ====================
 
 class ContractOverviewResponse(BaseModel):
@@ -380,18 +274,157 @@ class ContractOverviewResponse(BaseModel):
     data: Optional[Dict[str, Any]] = None
 
 
+class ContractAuditResponse(BaseModel):
+    """合同审核响应"""
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
+
+def _parse_pdf_to_markdown(file_path: Path, filename: str, content_type: str) -> str:
+    """使用 MinerU 解析 PDF 为 markdown（合同 overview 和 audit 端点共用）。
+
+    Args:
+        file_path: 已保存的文件路径
+        filename: 原始文件名
+        content_type: 文件 MIME 类型
+
+    Returns:
+        str: 解析后的 markdown 文本
+    """
+    import requests
+    import time
+    import zipfile
+
+    MINERU_BASE_URL = os.getenv("MINERU_BASE_URL", "https://mineru.net")
+    MINERU_API_KEY = os.getenv("MINERU_API_KEY", "")
+
+    if not MINERU_API_KEY:
+        raise ValueError("未配置 MINERU_API_KEY，请在 .env 文件中设置")
+
+    headers = {"Authorization": f"Bearer {MINERU_API_KEY}"}
+
+    # 读取本地文件内容
+    with open(file_path, "rb") as f:
+        file_content = f.read()
+
+    # 步骤 1: 申请上传链接（精准解析 API v4，先申请后 PUT 到 OSS）
+    batch_url = f"{MINERU_BASE_URL}/api/v4/file-urls/batch"
+    batch_data = {
+        "files": [
+            {
+                "name": filename,
+                "is_ocr": True,
+                "data_id": str(uuid.uuid4()),
+            }
+        ],
+        "language": "ch",
+    }
+    batch_response = requests.post(
+        batch_url, headers=headers, json=batch_data, timeout=60
+    )
+    if batch_response.status_code != 200:
+        raise Exception(f"MinerU 申请上传链接失败: {batch_response.text}")
+
+    batch_json = batch_response.json()
+    batch_id = batch_json.get("data", {}).get("batch_id")
+    file_urls = batch_json.get("data", {}).get("file_urls") or []
+    if not batch_id or not file_urls:
+        raise Exception("MinerU 未返回 batch_id 或上传链接")
+
+    upload_target = file_urls[0]
+    print(f"  获得上传链接: {upload_target}")
+
+    # 步骤 2: 将文件 PUT 到 OSS 上传链接（上传后 MinerU 自动提交解析任务）
+    # 注意：预签名 OSS URL 的签名不含自定义 Content-Type，附加该头会导致 SignatureDoesNotMatch
+    put_response = requests.put(
+        upload_target,
+        data=file_content,
+        timeout=120,
+    )
+    if put_response.status_code >= 300:
+        raise Exception(
+            f"MinerU 文件上传失败: {put_response.status_code} {put_response.text[:200]}"
+        )
+
+    print(f"  文件已上传，batch_id={batch_id}")
+
+    # 步骤 3: 轮询批量解析结果
+    poll_url = f"{MINERU_BASE_URL}/api/v4/extract-results/batch/{batch_id}"
+    max_wait = 240
+    start_time = time.time()
+
+    while True:
+        if time.time() - start_time > max_wait:
+            raise Exception("MinerU 解析超时")
+
+        poll_response = requests.get(poll_url, headers=headers, timeout=30)
+        if poll_response.status_code != 200:
+            raise Exception(f"MinerU 状态查询失败: {poll_response.text}")
+
+        poll_result = poll_response.json()
+        results = poll_result.get("data", {}).get("extract_result") or []
+        if not results:
+            print("  解析任务尚未就绪，继续等待...")
+            time.sleep(3)
+            continue
+
+        item = results[0]
+        state = item.get("state")
+        zip_url = item.get("full_zip_url")
+
+        if state == "done" and zip_url:
+            print("  解析完成，下载结果...")
+            break
+        elif state == "failed":
+            raise Exception(f"MinerU 解析失败: {item.get('err_msg', '')}")
+        else:
+            print(f"  状态: {state}，继续等待...")
+            time.sleep(3)
+
+    # 下载并解压结果
+    zip_response = requests.get(zip_url, timeout=60)
+    if zip_response.status_code != 200:
+        raise Exception(f"下载结果失败: {zip_response.status_code}")
+
+    zip_path = UPLOAD_DIR / f"{batch_id}.zip"
+    with open(zip_path, "wb") as f:
+        f.write(zip_response.content)
+
+    extract_dir = UPLOAD_DIR / batch_id
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+
+    md_files = list(extract_dir.rglob("*.md"))
+    if not md_files:
+        raise Exception("未找到解析结果文件")
+
+    md_content = md_files[0].read_text(encoding="utf-8")
+    print(f"  解析内容长度: {len(md_content)} 字符")
+
+    # 清理临时文件
+    try:
+        zip_path.unlink()
+        shutil.rmtree(extract_dir)
+    except Exception:
+        pass
+
+    return md_content
+
+
 @app.post("/api/contract/overview", response_model=ContractOverviewResponse)
 async def get_contract_overview(file: UploadFile = File(...)):
     """
     上传合同PDF/图片并提取概览信息
 
     提取内容：甲方、乙方、合同金额、日期等关键信息
-    支持格式: PDF, PNG, JPG, JPEG
+    支持格式: PDF
     """
+    file_path: Optional[Path] = None
     try:
-        # 验证文件类型
-        if not file.content_type or not file.content_type.startswith(('image/', 'application/pdf')):
-            raise HTTPException(status_code=400, detail="不支持的文件类型,仅支持图片和PDF")
+        # 验证文件类型（仅支持 PDF）
+        if file.content_type != 'application/pdf':
+            raise HTTPException(status_code=400, detail="不支持的文件类型，仅支持 PDF 格式的合同文件")
 
         # 验证文件大小 (20MB)
         file.file.seek(0, 2)
@@ -402,8 +435,7 @@ async def get_contract_overview(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="文件大小超过20MB限制")
 
         # 生成唯一文件名
-        file_ext = file.filename.split('.')[-1] if '.' in file.filename else 'pdf'
-        unique_filename = f"{uuid.uuid4()}.{file_ext}"
+        unique_filename = f"{uuid.uuid4()}.pdf"
         file_path = UPLOAD_DIR / unique_filename
 
         # 保存文件
@@ -412,153 +444,12 @@ async def get_contract_overview(file: UploadFile = File(...)):
 
         print(f"正在提取合同信息: {file_path}")
 
-        # 如果不是PDF，暂时不支持
-        if not file.content_type == 'application/pdf':
-            raise HTTPException(
-                status_code=400,
-                detail="目前仅支持PDF格式的合同文件"
-            )
-
         try:
-            # 步骤 1: 使用 MinerU 解析 PDF
+            # 步骤 1: 使用 MinerU 解析 PDF（异步包装避免阻塞事件循环）
             print(f"  步骤 1: 调用 MinerU 解析 PDF...")
-            import requests
-            import json as json_lib
-            import time
-            import zipfile
-
-            MINERU_BASE_URL = os.getenv("MINERU_BASE_URL", "https://mineru.net")
-            MINERU_API_KEY = os.getenv("MINERU_API_KEY", "")
-
-            # 检查 API Key 是否配置
-            if not MINERU_API_KEY:
-                raise ValueError("未配置 MINERU_API_KEY，请在.env 文件中设置")
-
-            # 构建 API URL
-            batch_url = f"{MINERU_BASE_URL}/api/v4/file-urls/batch"
-
-            # 读取文件内容
-            with open(file_path, "rb") as f:
-                file_content = f.read()
-
-            # 上传文件到 MinerU
-            headers = {
-                "Authorization": f"Bearer {MINERU_API_KEY}"
-            }
-
-            # 使用 MinerU 的文件上传接口
-            upload_url = f"{MINERU_BASE_URL}/api/v4/file/upload"
-            files = {
-                "file": (file.filename, file_content, file.content_type)
-            }
-
-            upload_response = requests.post(
-                upload_url,
-                headers=headers,
-                files=files,
-                timeout=60
+            md_content = await asyncio.to_thread(
+                _parse_pdf_to_markdown, file_path, file.filename, file.content_type
             )
-
-            if upload_response.status_code != 200:
-                raise Exception(f"MinerU 上传失败: {upload_response.text}")
-
-            upload_result = upload_response.json()
-            file_url = upload_result.get("data", {}).get("file_url")
-
-            if not file_url:
-                raise Exception("MinerU 未返回文件 URL")
-
-            print(f"  文件上传成功: {file_url}")
-
-            # 提交解析任务
-            task_url = f"{MINERU_BASE_URL}/api/v4/extract/task"
-            task_data = {
-                "file_url": file_url,
-                "is_ocr": True,
-                "enable_formula": False,
-                "enable_table": True,
-                "layout_model": "doclayout_yolo",
-                "language": "ch"
-            }
-
-            task_response = requests.post(
-                task_url,
-                headers=headers,
-                json=task_data,
-                timeout=30
-            )
-
-            if task_response.status_code != 200:
-                raise Exception(f"MinerU 任务提交失败: {task_response.text}")
-
-            task_result = task_response.json()
-            task_id = task_result.get("data", {}).get("task_id")
-
-            if not task_id:
-                raise Exception("MinerU 未返回任务 ID")
-
-            print(f"  任务已提交: {task_id}")
-
-            # 轮询任务状态
-            poll_url = f"{MINERU_BASE_URL}/api/v4/extract/task/{task_id}"
-            max_wait = 120  # 最多等待 2 分钟
-            start_time = time.time()
-
-            while True:
-                if time.time() - start_time > max_wait:
-                    raise Exception("MinerU 解析超时")
-
-                poll_response = requests.get(
-                    poll_url,
-                    headers=headers,
-                    timeout=30
-                )
-
-                if poll_response.status_code != 200:
-                    raise Exception(f"MinerU 状态查询失败: {poll_response.text}")
-
-                poll_result = poll_response.json()
-                status = poll_result.get("data", {}).get("status")
-                zip_url = poll_result.get("data", {}).get("full_zip_url")
-
-                if status == "completed" and zip_url:
-                    print(f"  解析完成，下载结果...")
-                    break
-                elif status == "failed":
-                    raise Exception("MinerU 解析失败")
-                else:
-                    print(f"  状态: {status}，继续等待...")
-                    time.sleep(2)
-
-            # 下载并解析结果
-            zip_response = requests.get(zip_url, timeout=60)
-            if zip_response.status_code != 200:
-                raise Exception(f"下载结果失败: {zip_response.status_code}")
-
-            # 保存并解压 ZIP
-            zip_path = UPLOAD_DIR / f"{task_id}.zip"
-            with open(zip_path, "wb") as f:
-                f.write(zip_response.content)
-
-            extract_dir = UPLOAD_DIR / task_id
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-
-            # 查找 markdown 文件
-            md_files = list(extract_dir.rglob("*.md"))
-            if not md_files:
-                raise Exception("未找到解析结果文件")
-
-            # 读取第一个 markdown 文件
-            md_content = md_files[0].read_text(encoding="utf-8")
-            print(f"  解析内容长度: {len(md_content)} 字符")
-
-            # 清理临时文件
-            try:
-                zip_path.unlink()
-                shutil.rmtree(extract_dir)
-            except:
-                pass
 
         except Exception as e:
             print(f"MinerU 解析失败: {str(e)}")
@@ -591,6 +482,162 @@ async def get_contract_overview(file: UploadFile = File(...)):
     except Exception as e:
         print(f"合同处理错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"合同处理失败: {str(e)}")
+    finally:
+        # 清理上传的临时文件
+        if file_path is not None:
+            try:
+                file_path.unlink()
+            except Exception:
+                pass
+
+
+@app.post("/api/contract/audit", response_model=ContractAuditResponse)
+def audit_contract(
+    file: UploadFile = File(...),
+    rules: Optional[str] = Form(None)
+):
+    """
+    上传合同 PDF 并进行专业审核
+
+    审核流程（Harness Engineering v2）：
+    1. MinerU 解析 PDF → markdown
+    2. 确定性管线：金额/日期/条款引用/甲乙方名称校验（零 LLM）
+    3. 合同类型识别：轻量 LLM 调用
+    4. Agent 审核：VFS + Skill + 工具 + Planner 自规划
+    5. 双向验证回路：查幻觉 + 查遗漏
+
+    支持格式: PDF
+
+    实现说明：使用同步端点（def 而非 async def），FastAPI 自动在 threadpool 中执行。
+    这样线程内 asyncio.new_event_loop() 是干净的（无父 loop 引用），
+    避免与 LangGraph 异步资源冲突导致 ainvoke 永久挂起。
+
+    Args:
+        file: 合同 PDF 文件
+        rules: 可选，JSON 格式的规则ID列表（如 '["1","2","3"]'），为空则使用全部规则
+    """
+    file_path: Optional[Path] = None
+    try:
+        # 验证文件类型（仅支持 PDF）
+        if file.content_type != 'application/pdf':
+            raise HTTPException(status_code=400, detail="不支持的文件类型，仅支持 PDF 格式的合同文件")
+
+        # 验证文件大小 (20MB)
+        file.file.seek(0, 2)
+        file_size = file.file.tell()
+        file.file.seek(0)
+
+        if file_size > 20 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="文件大小超过 20MB 限制")
+
+        # 生成唯一文件名
+        unique_filename = f"{uuid.uuid4()}.pdf"
+        file_path = UPLOAD_DIR / unique_filename
+
+        # 保存文件
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        print(f"正在审核合同: {file_path}")
+
+        try:
+            # 步骤 1: MinerU 解析 PDF（同步阻塞调用，requests 库）
+            print(f"  步骤 1: 调用 MinerU 解析 PDF...")
+            md_content = _parse_pdf_to_markdown(file_path, file.filename, file.content_type)
+
+        except Exception as e:
+            print(f"MinerU 解析失败: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"合同解析失败: {str(e)}"
+            )
+
+        try:
+            # 步骤 2-5: 确定性管线 + 类型识别 + Agent 审核 + 验证回路
+            # 函数内部使用 asyncio.new_event_loop + run_until_complete，自带 180s 超时保护
+            print(f"  步骤 2-5: 合同审核（确定性管线 + Agent + 验证回路）...")
+
+            # 解析规则列表
+            selected_rules = None
+            if rules:
+                try:
+                    selected_rules = json.loads(rules)
+                    print(f"  使用自定义规则: {selected_rules}")
+                except json.JSONDecodeError:
+                    print(f"  [WARN] 规则参数解析失败，使用全部规则")
+
+            report: ContractAuditReport = audit_contract_with_agent_sync(md_content, selected_rules=selected_rules)
+
+            print(f"  审核完成: {report.overall_risk_level} - {report.summary}")
+
+            # 保存历史记录
+            try:
+                save_record({
+                    "id": str(uuid.uuid4()),
+                    "type": "合同审查",
+                    "title": file.filename or "合同文件",
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "status": "已完成",
+                    "summary": report.summary,
+                    "risk_level": report.overall_risk_level,
+                    "detail": report.model_dump(),
+                })
+            except Exception as e:
+                print(f"[WARN] 保存合同审查历史失败：{e}")
+
+            return ContractAuditResponse(
+                success=True,
+                message=f"合同审核完成：{report.summary}",
+                data=report.model_dump()
+            )
+
+        except Exception as e:
+            print(f"合同审核失败: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"合同审核失败: {str(e)}"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"合同处理错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"合同处理失败: {str(e)}")
+    finally:
+        # 清理上传的临时文件
+        if file_path is not None:
+            try:
+                file_path.unlink()
+            except Exception:
+                pass
+
+
+# ==================== 历史记录 API ====================
+
+class HistoryResponse(BaseModel):
+    """历史记录响应"""
+    success: bool
+    message: str
+    data: Optional[List[Dict[str, Any]]] = None
+
+
+@app.get("/api/history", response_model=HistoryResponse)
+async def get_history():
+    """
+    获取全部历史记录（最新的排在前面）
+
+    每条记录包含：id, type, title, date, status, summary, risk_level 等字段。
+    """
+    try:
+        records = load_records()
+        return HistoryResponse(
+            success=True,
+            message=f"获取历史记录成功，共 {len(records)} 条",
+            data=records
+        )
+    except Exception as e:
+        print(f"获取历史记录失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取历史记录失败: {str(e)}")
 
 
 # ==================== 启动 ====================

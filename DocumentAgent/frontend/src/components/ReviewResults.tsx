@@ -2,6 +2,42 @@ import { ArrowLeft, CheckCircle, AlertCircle, XCircle, Download, FileText, Info 
 import { useState } from 'react';
 import { ValidationReport, AgentReport, ValidationResult } from '../services/api';
 
+/**
+ * 生成格式化的审查报告文本（用于导出）
+ */
+function formatReportText(report: ValidationReport): string {
+  const lines: string[] = [];
+  lines.push('═══════════════════════════════════════');
+  lines.push('       发票审查报告');
+  lines.push('═══════════════════════════════════════');
+  lines.push('');
+  lines.push(`发票ID：${report.invoice_id}`);
+  lines.push(`审查时间：${report.validation_time}`);
+  lines.push(`总体状态：${report.overall_status}`);
+  lines.push(`总结：${report.summary}`);
+  lines.push('');
+  lines.push('───────────────────────────────────────');
+
+  for (const ar of report.agent_reports) {
+    lines.push('');
+    lines.push(`【${ar.agent_name}】  执行时间：${ar.execution_time.toFixed(2)}s`);
+    lines.push('─'.repeat(40));
+    for (const r of ar.results) {
+      const levelTag = r.level === 'error' ? '[错误]' : r.level === 'warning' ? '[警告]' : '[信息]';
+      lines.push(`  ${levelTag} ${r.category}`);
+      lines.push(`    ${r.message}`);
+      if (r.field) lines.push(`    字段：${r.field}`);
+      if (r.expected != null) lines.push(`    期望：${JSON.stringify(r.expected)}`);
+      if (r.actual != null) lines.push(`    实际：${JSON.stringify(r.actual)}`);
+      if (r.suggestion) lines.push(`    建议：${r.suggestion}`);
+    }
+  }
+
+  lines.push('');
+  lines.push('═══════════════════════════════════════');
+  return lines.join('\n');
+}
+
 interface ReviewResultsProps {
   onBack: () => void;
   activeMenu: string;
@@ -11,6 +47,26 @@ interface ReviewResultsProps {
 export function ReviewResults({ onBack, activeMenu, validationReport }: ReviewResultsProps) {
   const [selectedRow, setSelectedRow] = useState<number | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('全部');
+
+  /** 导出报告：下载格式化文本文件 */
+  const handleExportReport = () => {
+    if (!validationReport) return;
+    const text = formatReportText(validationReport);
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `发票审查报告_${validationReport.invoice_id}_${new Date().toISOString().slice(0, 10)}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  /** 生成PDF：调用浏览器打印（可另存为PDF） */
+  const handleGeneratePDF = () => {
+    window.print();
+  };
 
   if (!validationReport) {
     return (
@@ -114,7 +170,7 @@ export function ReviewResults({ onBack, activeMenu, validationReport }: ReviewRe
   };
 
   return (
-    <div className="h-full flex flex-col glass-effect">
+    <div className="h-full flex flex-col glass-effect print-area">
       <div className="p-6 border-b border-white/30 glass-effect-dark">
         <button
           onClick={onBack}
@@ -126,11 +182,11 @@ export function ReviewResults({ onBack, activeMenu, validationReport }: ReviewRe
         <div className="flex items-center justify-between">
           <h2 className="text-xl gradient-text">审查结果 - {activeMenu}</h2>
           <div className="flex gap-2">
-            <button className="flex items-center gap-2 px-4 py-2 glass-effect border border-white/30 rounded-xl hover:bg-white/90 transition-all duration-300 hover:scale-105 shadow-md hover:shadow-lg">
+            <button onClick={handleExportReport} className="flex items-center gap-2 px-4 py-2 glass-effect border border-white/30 rounded-xl hover:bg-white/90 transition-all duration-300 hover:scale-105 shadow-md hover:shadow-lg">
               <Download className="w-4 h-4" />
               导出报告
             </button>
-            <button className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-xl hover:from-blue-600 hover:to-purple-600 transition-all duration-300 hover:scale-105 shadow-lg hover:shadow-xl">
+            <button onClick={handleGeneratePDF} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-xl hover:from-blue-600 hover:to-purple-600 transition-all duration-300 hover:scale-105 shadow-lg hover:shadow-xl">
               <FileText className="w-4 h-4" />
               生成PDF
             </button>
@@ -191,7 +247,16 @@ export function ReviewResults({ onBack, activeMenu, validationReport }: ReviewRe
               </tr>
             </thead>
             <tbody className="divide-y divide-white/30">
-              {filteredItems.map((item, index) => (
+              {filteredItems.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-10 text-center">
+                    <div className="text-gray-400 text-sm">
+                      未返回结构化审查分项，请查看下方「审查说明」。
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+              filteredItems.map((item, index) => (
                 <>
                   <tr
                     key={index}
@@ -342,7 +407,8 @@ export function ReviewResults({ onBack, activeMenu, validationReport }: ReviewRe
                     </tr>
                   )}
                 </>
-              ))}
+              ))
+              )}
             </tbody>
           </table>
         </div>

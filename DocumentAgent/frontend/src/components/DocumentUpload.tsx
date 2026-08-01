@@ -40,6 +40,11 @@ export function DocumentUpload({ onUpload, activeMenu }: DocumentUploadProps) {
     ? '快速审查票据的合规性风险，提供专业的识别提示与优化建议'
     : '快速审查合同的合规性风险，提供专业的识别提示与优化建议';
 
+  // 后端 /api/contract/audit 仅接受 PDF，其余格式会返回 400；票据审查支持更多格式
+  const isContract = activeMenu === '合同审查';
+  const acceptAttr = isContract ? '.pdf' : '.pdf,.doc,.docx,.png,.jpg,.jpeg';
+  const formatHint = isContract ? '限定格式：pdf' : '限定格式：pdf/doc/docx/png/jpg/jpeg';
+
   return (
     <div className="flex flex-col items-center justify-center h-full px-8 relative">
       {/* 装饰性背景元素 */}
@@ -52,14 +57,6 @@ export function DocumentUpload({ onUpload, activeMenu }: DocumentUploadProps) {
           {description}
         </p>
 
-        <div className="flex gap-2 justify-center mb-8">
-          <button className="px-6 py-2.5 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-xl hover:from-blue-600 hover:to-blue-700 transition-all duration-300 shadow-lg hover:shadow-xl hover:scale-105">
-            {activeMenu === '票据审查' ? '票据审查' : '合同审查'}
-          </button>
-          <button className="px-6 py-2.5 glass-effect text-gray-700 rounded-xl hover:bg-white/90 transition-all duration-300 shadow-md hover:shadow-lg hover:scale-105">
-            对比审查
-          </button>
-        </div>
 
         <div
           onDrop={handleDrop}
@@ -84,28 +81,18 @@ export function DocumentUpload({ onUpload, activeMenu }: DocumentUploadProps) {
           
           <div className="mb-2">点击或将{activeMenu === '票据审查' ? '票据' : '合同'}拖拽到这里上传</div>
           <div className="text-sm text-gray-500">
-            单个文件不超过20M，限20份文件，限定格式：pdf/doc/docx/png/jpg/jpeg
+            单个文件不超过20M，限20份文件，{formatHint}
           </div>
 
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.doc,.docx,.png,.jpg,.jpeg"
+            accept={acceptAttr}
             onChange={handleFileChange}
             className="hidden"
           />
         </div>
 
-        <div className="mt-6 flex items-center gap-2 text-sm text-gray-600 glass-effect rounded-lg p-3">
-          <svg className="w-4 h-4 text-blue-500" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 13A6 6 0 1114 8a6 6 0 01-6 6z"/>
-            <path d="M8 4a.5.5 0 01.5.5v3h3a.5.5 0 010 1h-3v3a.5.5 0 01-1 0v-3h-3a.5.5 0 010-1h3v-3A.5.5 0 018 4z"/>
-          </svg>
-          <span>{activeMenu}尚处在测试阶段</span>
-          <button className="text-blue-500 hover:text-blue-600 hover:underline transition-colors text-xs">
-            发现缺陷？反馈 →
-          </button>
-        </div>
       </div>
     </div>
   );

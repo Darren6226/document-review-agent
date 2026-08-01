@@ -1,6 +1,28 @@
-"""
-发票校验数据模型
+"""发票校验数据模型
 使用 Pydantic 定义结构化输出
+
+合同审核数据流（Mermaid 参考图）：
+flowchart LR
+    A[前端上传 PDF] --> B[/api/contract/overview]
+    B --> C[MinerU 解析 PDF]
+    C --> D[LLM 提取 ContractOverview]
+    D --> E[前端展示概览]
+    E --> F[点击审核按钮]
+    F --> G[/api/contract/audit]
+    G --> H[MinerU 再次解析 PDF]
+    H --> I[确定性管线 金额/日期/条款/甲乙方]
+    I --> J[合同类型识别 LLM]
+    J --> K[合同写入 VFS]
+    K --> L[Agent 审核 VFS+Skill+工具]
+    L --> M[双向验证回路 查幻觉+查遗漏]
+    M --> N[ContractAuditReport]
+    N --> O[前端展示结果]
+    style A fill:#bbdefb,color:#0d47a1
+    style G fill:#bbdefb,color:#0d47a1
+    style I fill:#c8e6c9,color:#1a5e20
+    style L fill:#fff3e0,color:#e65100
+    style M fill:#f3e5f5,color:#7b1fa2
+    style N fill:#c8e6c9,color:#1a5e20
 """
 
 from typing import List, Dict, Any, Optional
@@ -65,3 +87,121 @@ class FinalValidationReport(BaseModel):
     @property
     def total_info(self) -> int:
         return sum(r.info_count for r in self.agent_reports)
+
+
+# ============================================
+# 合同审核数据模型（Harness Engineering v2）
+# 体现：三重证据链追溯 + 双向验证回路
+# ============================================
+
+class ContractType(str, Enum):
+    """合同类型（用于动态加载专属 Skill）"""
+    LABOR = "labor"       # 劳动合同
+    SALES = "sales"       # 买卖合同
+    LEASE = "lease"       # 租赁合同
+    LOAN = "loan"         # 借款合同
+    GENERAL = "general"   # 通用/其他
+
+
+class IssueSeverity(str, Enum):
+    """问题严重程度"""
+    HIGH = "high"       # 必须修正 - 可能导致合同无效或重大损失
+    MEDIUM = "medium"   # 建议修正 - 可能引发争议
+    LOW = "low"         # 可优化 - 规范性问题
+
+
+class BasisType(str, Enum):
+    """判定依据来源（证据链第三重：判定来源）"""
+    LLM_JUDGMENT = "llm_judgment"       # LLM 语义判定
+    DETERMINISTIC = "deterministic"     # 确定性代码判定
+    HYBRID = "hybrid"                   # 混合判定（确定性发现 + LLM 解释）
+
+
+class ContractIssue(BaseModel):
+    """合同审核问题（带三重证据链：原文位置 + 规则编号 + 判定来源）"""
+    # 基本字段
+    rule_category: str = Field(..., description="规则类别，如'法律术语规范性'、'金额准确性'")
+    issue_type: str = Field(..., description="问题类型，如'法律术语错误'、'大小写不一致'")
+    issue_category: str = Field(
+        default="other",
+        description="问题性质分类，用于验证回路精准分流。"
+                    "clause_invalid: 条款存在但无效/有问题（必须提供 original 引用）；"
+                    "clause_missing: 合同缺少必备条款（original='无' 是合法的）；"
+                    "term_error: 术语/表述错误（必须提供 original 引用）；"
+                    "other: 其他类型"
+    )
+    description: str = Field(..., description="问题详细描述")
+    original: str = Field(default="", description="原文中有问题的片段（精确引用）")
+    suggestion: str = Field(..., description="修改建议")
+    severity: IssueSeverity = Field(..., description="严重程度")
+    legal_risk: str = Field(default="", description="法律风险说明（high 必填）")
+
+    # 证据链字段（优化 4）
+    evidence_location: str = Field(default="", description="原文定位，如'第三条第二款'、'第47行'")
+    rule_id: str = Field(..., description="精确规则编号，如 LABOR.2.1 / SALES.3.2 / DETERM.amount_case")
+    basis_type: BasisType = Field(default=BasisType.LLM_JUDGMENT, description="判定依据来源")
+    deterministic_ref: Optional[str] = Field(None, description="若基于确定性 finding，引用 finding_id")
+
+    # 验证状态（优化 3：双向验证回路）
+    verified: bool = Field(default=False, description="是否通过验证回路校验")
+    verification_note: str = Field(default="", description="验证说明（未通过时填写原因）")
+
+
+class DeterministicFinding(BaseModel):
+    """确定性校验结果（纯代码判定，零 LLM）"""
+    finding_id: str = Field(..., description="finding 唯一标识，如 DETERM.amount_case.1")
+    rule_id: str = Field(..., description="对应规则编号")
+    rule_category: str = Field(..., description="规则类别")
+    passed: bool = Field(..., description="是否通过")
+    field: str = Field(default="", description="校验字段")
+    expected: Optional[Any] = Field(None, description="期望值")
+    actual: Optional[Any] = Field(None, description="实际值")
+    detail: str = Field(..., description="校验详情")
+    location: str = Field(default="", description="原文定位")
+    # 双向验证回路：LLM 是否覆盖了此 finding
+    covered_by_llm: bool = Field(default=False, description="LLM 的 issues 是否覆盖了此 FAIL 项")
+
+
+class ContractAuditReport(BaseModel):
+    """合同审核报告（汇总确定性结果 + LLM 结果 + 验证状态）"""
+    contract_id: str = Field(..., description="合同标识")
+    contract_type: ContractType = Field(default=ContractType.GENERAL, description="合同类型")
+    validation_time: str = Field(..., description="审核时间")
+
+    deterministic_findings: List[DeterministicFinding] = Field(default_factory=list, description="确定性校验结果")
+    issues: List[ContractIssue] = Field(default_factory=list, description="审核问题列表")
+
+    overall_risk_level: str = Field(..., description="整体风险等级: high/medium/low/none")
+    summary: str = Field(..., description="审核总结")
+
+    # 统计属性
+    @property
+    def high_severity_count(self) -> int:
+        return len([i for i in self.issues if i.severity == IssueSeverity.HIGH])
+
+    @property
+    def medium_severity_count(self) -> int:
+        return len([i for i in self.issues if i.severity == IssueSeverity.MEDIUM])
+
+    @property
+    def low_severity_count(self) -> int:
+        return len([i for i in self.issues if i.severity == IssueSeverity.LOW])
+
+    @property
+    def unverified_count(self) -> int:
+        """未通过验证回路的 issue 数量"""
+        return len([i for i in self.issues if not i.verified])
+
+    @property
+    def deterministic_fail_count(self) -> int:
+        """确定性校验失败数"""
+        return len([f for f in self.deterministic_findings if not f.passed])
+
+    @property
+    def llm_coverage_rate(self) -> float:
+        """LLM 对确定性 FAIL 项的覆盖率（验证回路关键指标）"""
+        fails = [f for f in self.deterministic_findings if not f.passed]
+        if not fails:
+            return 1.0
+        covered = len([f for f in fails if f.covered_by_llm])
+        return round(covered / len(fails), 2)

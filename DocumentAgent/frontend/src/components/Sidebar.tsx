@@ -1,4 +1,4 @@
-import { FileText, FileCheck, Settings } from 'lucide-react';
+import { FileText, FileCheck } from 'lucide-react';
 
 interface SidebarProps {
   activeMenu: string;
@@ -17,21 +17,6 @@ export function Sidebar({ activeMenu, onMenuChange, collapsed, onToggleCollapse 
     <div className={`glass-effect-dark border-r border-white/50 flex flex-col shadow-premium transition-all duration-300 ${
       collapsed ? 'w-16' : 'w-56'
     }`}>
-      {/* Logo区域 */}
-      <div className="p-4 border-b border-white/30">
-        {!collapsed && (
-          <>
-            <div className="mb-1 gradient-text">赋范空间公开体验课</div>
-            <div className="text-xs text-gray-500">by 木羽Cheney</div>
-          </>
-        )}
-        {collapsed && (
-          <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-500 rounded-lg flex items-center justify-center mx-auto">
-            <span className="text-white text-xs">赋</span>
-          </div>
-        )}
-      </div>
-
       {/* 主菜单 */}
       <div className="flex-1 py-2 overflow-y-auto">
         {menuItems.map((item) => (
@@ -56,18 +41,6 @@ export function Sidebar({ activeMenu, onMenuChange, collapsed, onToggleCollapse 
         ))}
       </div>
 
-      {/* 底部菜单 */}
-      <div className="border-t border-white/30 py-2">
-        <button
-          className="w-full px-4 py-2.5 flex items-center gap-3 text-gray-600 hover:bg-white/60 transition-all duration-300 group"
-          title={collapsed ? '配置' : ''}
-        >
-          <Settings className={`w-4 h-4 transition-transform duration-300 group-hover:rotate-90 ${
-            collapsed ? 'mx-auto' : ''
-          }`} />
-          {!collapsed && <span className="text-sm">配置</span>}
-        </button>
-      </div>
     </div>
   );
 }

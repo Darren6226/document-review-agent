@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ContractAuditResult } from '../services/api';
+import { ContractAuditResult, ContractAuditIssue } from '../services/api';
 
 interface ContractReviewResultsProps {
   onBack: () => void;
@@ -16,11 +16,25 @@ interface AuditIssue {
   suggestion: string;
   severity: 'high' | 'medium' | 'low';
   legal_risk: string;
+  // 证据链字段
+  evidence_location: string;
+  rule_id: string;
+  basis_type: 'llm_judgment' | 'deterministic' | 'hybrid';
+  deterministic_ref?: string | null;
+  // 验证状态
+  verified: boolean;
+  verification_note: string;
 }
+
+const BASIS_TYPE_LABEL: Record<string, string> = {
+  llm_judgment: 'LLM 判定',
+  deterministic: '确定性判定',
+  hybrid: '混合判定',
+};
 
 export function ContractReviewResults({ onBack, auditResult, documentUrl }: ContractReviewResultsProps) {
   const [auditResults, setAuditResults] = useState<AuditIssue[]>([]);
-  const [activeTab, setActiveTab] = useState<'high' | 'medium' | 'low' | 'pass'>('high');
+  const [activeTab, setActiveTab] = useState<'high' | 'medium' | 'low' | 'pass' | 'unverified'>('high');
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   // 检测是否为PDF文件
@@ -28,7 +42,7 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
 
   useEffect(() => {
     if (auditResult && auditResult.issues) {
-      const formattedIssues = auditResult.issues.map((issue, index) => ({
+      const formattedIssues = auditResult.issues.map((issue: ContractAuditIssue, index) => ({
         id: index + 1,
         rule_category: issue.rule_category,
         issue_type: issue.issue_type,
@@ -36,7 +50,13 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
         original: issue.original,
         suggestion: issue.suggestion,
         severity: issue.severity,
-        legal_risk: issue.legal_risk
+        legal_risk: issue.legal_risk,
+        evidence_location: issue.evidence_location,
+        rule_id: issue.rule_id,
+        basis_type: issue.basis_type,
+        deterministic_ref: issue.deterministic_ref,
+        verified: issue.verified,
+        verification_note: issue.verification_note,
       }));
       setAuditResults(formattedIssues);
 
@@ -64,11 +84,13 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
   const highRiskCount = auditResults.filter(item => item.severity === 'high').length;
   const mediumRiskCount = auditResults.filter(item => item.severity === 'medium').length;
   const lowRiskCount = auditResults.filter(item => item.severity === 'low').length;
-  const totalRules = 15;
-  const passCount = totalRules - auditResults.length;
+  const verifiedCount = auditResults.filter(item => item.verified).length;
+  const unverifiedCount = auditResults.length - verifiedCount;
 
   const filteredResults = activeTab === 'pass'
-    ? []
+    ? auditResults.filter(item => item.verified)
+    : activeTab === 'unverified'
+    ? auditResults.filter(item => !item.verified)
     : auditResults.filter(item => item.severity === activeTab);
 
   // 获取风险等级的显示文本和颜色
@@ -77,6 +99,7 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
       case 'high': return '高风险';
       case 'medium': return '中风险';
       case 'low': return '低风险';
+      case 'unverified': return '未验证';
       default: return '';
     }
   };
@@ -86,6 +109,7 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
       case 'high': return 'bg-red-500';
       case 'medium': return 'bg-orange-500';
       case 'low': return 'bg-yellow-500';
+      case 'unverified': return 'bg-red-500';
       default: return 'bg-gray-500';
     }
   };
@@ -147,36 +171,14 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
         {/* 顶部标签栏 */}
         <div className="h-14 bg-white border-b border-gray-200 flex items-center px-6">
           <div className="flex gap-8">
-            <button className="flex items-center gap-2 text-sm font-medium text-blue-600 pb-4 border-b-2 border-blue-600">
+            <span className="flex items-center gap-2 text-sm font-medium text-blue-600 pb-4 border-b-2 border-blue-600">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
               </svg>
               风险审查
-            </button>
-            <button className="text-sm text-gray-500 hover:text-gray-700 pb-4 flex items-center gap-2">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              主体审查
-            </button>
+            </span>
           </div>
-          <div className="ml-auto flex gap-2">
-            <button className="p-2 hover:bg-gray-100 rounded text-gray-500">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-            </button>
-            <button className="p-2 hover:bg-gray-100 rounded text-gray-500">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-              </svg>
-            </button>
-            <button className="p-2 hover:bg-gray-100 rounded text-gray-500">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-            </button>
-          </div>
+          <div className="ml-auto w-16"></div>
         </div>
 
         {/* 统计标签 */}
@@ -224,8 +226,21 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
               }`}
             >
               <span className={`w-2 h-2 ${activeTab === 'pass' ? 'bg-green-500' : 'bg-green-300'} rounded-sm`}></span>
-              通过 ({passCount})
+              已验证 ({verifiedCount})
             </button>
+            {unverifiedCount > 0 && (
+              <button
+                onClick={() => setActiveTab('unverified')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  activeTab === 'unverified'
+                    ? 'bg-red-100 text-red-700 border border-red-200'
+                    : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <span className={`w-2 h-2 ${activeTab === 'unverified' ? 'bg-red-500' : 'bg-red-300'} rounded-sm`}></span>
+                未验证 ({unverifiedCount})
+              </button>
+            )}
           </div>
         </div>
 
@@ -239,25 +254,23 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
 
         {/* 问题列表 */}
         <div className="flex-1 overflow-y-auto">
-          {activeTab === 'pass' ? (
-            <div className="flex flex-col items-center justify-center h-full text-center py-12 px-6">
-              <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mb-4">
-                <svg className="w-10 h-10 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-              <h4 className="text-base font-semibold text-gray-800 mb-2">审查通过</h4>
-              <p className="text-sm text-gray-500">这些规则审查无问题</p>
-            </div>
-          ) : filteredResults.length === 0 ? (
+          {filteredResults.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-12 px-6">
               <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mb-4">
                 <svg className="w-10 h-10 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               </div>
-              <h4 className="text-base font-semibold text-gray-800 mb-2">暂无问题</h4>
-              <p className="text-sm text-gray-500">该风险等级下没有发现问题</p>
+              <h4 className="text-base font-semibold text-gray-800 mb-2">
+                {activeTab === 'pass' ? '暂无已验证项' : activeTab === 'unverified' ? '暂无未验证项' : '暂无问题'}
+              </h4>
+              <p className="text-sm text-gray-500">
+                {activeTab === 'pass'
+                  ? '当前没有通过验证回路校验的 issue'
+                  : activeTab === 'unverified'
+                    ? '所有 issue 均已通过验证回路校验'
+                    : '该风险等级下没有发现问题'}
+              </p>
             </div>
           ) : (
             <div>
@@ -304,6 +317,34 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
                                 <div className="text-xs text-gray-500 mb-1.5">审查细则类别：{item.rule_category}</div>
                               </div>
 
+                              {/* 证据链元信息 */}
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                {item.rule_id && (
+                                  <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded border border-gray-200">
+                                    规则编号：{item.rule_id}
+                                  </span>
+                                )}
+                                {item.basis_type && (
+                                  <span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded border border-purple-200">
+                                    {BASIS_TYPE_LABEL[item.basis_type] || item.basis_type}
+                                  </span>
+                                )}
+                                {item.evidence_location && (
+                                  <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded border border-blue-200">
+                                    位置：{item.evidence_location}
+                                  </span>
+                                )}
+                                <span
+                                  className={`px-2 py-0.5 rounded border ${
+                                    item.verified
+                                      ? 'bg-green-50 text-green-700 border-green-200'
+                                      : 'bg-red-50 text-red-700 border-red-200'
+                                  }`}
+                                >
+                                  {item.verified ? '✓ 已验证' : '⚠ 未验证'}
+                                </span>
+                              </div>
+
                               {item.description && (
                                 <div>
                                   <div className="text-xs text-gray-500 mb-1.5">问题描述：</div>
@@ -333,6 +374,21 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
                                   <div className="text-sm text-red-700 bg-red-50 p-3 rounded border border-red-200 leading-relaxed">
                                     {item.legal_risk}
                                   </div>
+                                </div>
+                              )}
+
+                              {!item.verified && item.verification_note && (
+                                <div>
+                                  <div className="text-xs text-orange-600 mb-1.5 font-medium">验证说明：</div>
+                                  <div className="text-sm text-orange-700 bg-orange-50 p-3 rounded border border-orange-200 leading-relaxed">
+                                    {item.verification_note}
+                                  </div>
+                                </div>
+                              )}
+
+                              {item.deterministic_ref && (
+                                <div className="text-xs text-gray-500">
+                                  引用确定性 finding：{item.deterministic_ref}
                                 </div>
                               )}
                             </div>

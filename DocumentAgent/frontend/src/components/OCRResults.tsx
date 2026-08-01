@@ -6,7 +6,7 @@ interface OCRResultsProps {
   contractData?: any;
   activeMenu?: string;
   isProcessing: boolean;
-  onStartContractReview?: () => void;
+  onStartContractReview?: (selectedRuleIds?: string[]) => void;
 }
 
 export function OCRResults({ data, contractData, activeMenu = '票据审查', isProcessing, onStartContractReview }: OCRResultsProps) {
@@ -171,7 +171,13 @@ export function OCRResults({ data, contractData, activeMenu = '票据审查', is
         {/* 底部按钮 */}
         <div className="p-4 border-t border-white/30 flex flex-col gap-2">
           <button
-            onClick={onStartContractReview}
+            onClick={() => {
+              // 获取选中的规则ID列表
+              const selectedRuleIds = checklist
+                .filter(item => item.checked)
+                .map(item => String(item.id));
+              onStartContractReview?.(selectedRuleIds);
+            }}
             className="w-full px-4 py-2.5 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white rounded-xl hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 transition-all duration-300 shadow-lg hover:shadow-xl hover:scale-105 flex items-center justify-center gap-2 text-sm font-medium"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -183,7 +189,7 @@ export function OCRResults({ data, contractData, activeMenu = '票据审查', is
             <span className="inline-flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-700 rounded font-medium">
               PRO
             </span>
-            自定义审查规则
+            已选 {checkedCount}/{checklist.length} 条规则
           </div>
         </div>
       </div>
@@ -195,18 +201,6 @@ export function OCRResults({ data, contractData, activeMenu = '票据审查', is
     <div className="w-96 glass-effect-dark border-l border-white/50 flex flex-col shadow-premium">
       <div className="p-4 border-b border-white/30 flex items-center justify-between">
         <h3 className="text-lg gradient-text">识别结果</h3>
-        <div className="flex gap-2">
-          <button className="p-2 hover:bg-white/60 rounded-lg transition-all duration-300 hover:scale-110 group">
-            <svg className="w-4 h-4 text-gray-600 group-hover:text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
-            </svg>
-          </button>
-          <button className="p-2 hover:bg-white/60 rounded-lg transition-all duration-300 hover:scale-110 group">
-            <svg className="w-4 h-4 text-gray-600 group-hover:text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
-            </svg>
-          </button>
-        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
@@ -287,16 +281,6 @@ export function OCRResults({ data, contractData, activeMenu = '票据审查', is
         </div>
       </div>
 
-      <div className="border-t border-white/30">
-        <div className="p-3">
-          <button className="w-full text-sm px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-300 shadow-md hover:shadow-lg hover:scale-105 flex items-center justify-center gap-2">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
-            </svg>
-            购买方信息
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

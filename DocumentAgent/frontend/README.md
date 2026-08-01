@@ -5,7 +5,7 @@
 ## 项目特点
 
 - ✨ 完整的 UI 设计,包含毛玻璃效果、渐变动画等现代化样式
-- 🎨 使用 Tailwind CSS 4.0 进行样式开发
+- 🎨 使用 Tailwind CSS 3.4.18 进行样式开发
 - ⚡️ Vite 6.x 提供极速的开发体验
 - 📦 使用 React 18.3 和 TypeScript 5.x
 - 🎯 包含完整的票据审查和合同审查功能界面
@@ -16,7 +16,7 @@
 - **框架**: React 18.3.1
 - **构建工具**: Vite 6.3.5
 - **语言**: TypeScript 5.3.3
-- **样式**: Tailwind CSS 4.1.0
+- **样式**: Tailwind CSS 3.4.18
 - **UI 组件**: Radix UI 系列组件
 - **图标**: Lucide React
 
@@ -56,9 +56,9 @@ npm run preview
 
 ## 注意事项
 
-1. 本项目是前端静态页面,数据为模拟数据
-2. 后端接口需要单独实现
-3. 准备接入 FastAPI 后端时需要配置 CORS
+1. 前端通过 `src/services/api.ts` 接入 FastAPI 后端（默认 `http://localhost:8000`，可用 `VITE_API_URL` 环境变量覆盖）
+2. 本地开发需在后端启用 CORS（允许 `http://localhost:3000` 来源）
+3. 后端 API 配置（密钥、MinerU 等）详见后端 `README.md` 的「API 配置」章节
 
 ## 许可证
 

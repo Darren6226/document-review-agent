@@ -296,3 +296,58 @@ html {
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
+
+/* ═══════════════ 打印样式（生成PDF时生效） ═══════════════ */
+@media print {
+  /* 隐藏非内容元素 */
+  body * {
+    visibility: hidden;
+  }
+  .glass-effect,
+  .glass-effect-dark,
+  #root > div:not(.print-area),
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  /* 审查结果页面作为打印区域 */
+  .print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: white !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  /* 隐藏操作按钮、筛选器 */
+  .print-area button,
+  .print-area [role="tablist"],
+  .no-print {
+    display: none !important;
+  }
+  /* 报告内容全宽展示 */
+  .print-area table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+  }
+  .print-area th,
+  .print-area td {
+    border: 1px solid #ccc !important;
+    padding: 6px 10px !important;
+  }
+  .print-area .overflow-auto {
+    overflow: visible !important;
+  }
+  /* 移除渐变/阴影等打印无效效果 */
+  .print-area .gradient-text {
+    background: none !important;
+    -webkit-background-clip: unset !important;
+    -webkit-text-fill-color: #333 !important;
+    color: #333 !important;
+  }
+  .print-area .shadow-premium-lg,
+  .print-area .shadow-premium {
+    box-shadow: none !important;
+  }
+}

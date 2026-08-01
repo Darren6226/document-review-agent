@@ -15,7 +15,7 @@
 ### 2. 重新启动(如需要)
 
 ```bash
-cd /home/MuyuWorkSpace/07_DocumentReviewAgent/DocumentAgent/frontend
+cd DocumentAgent/frontend
 npm run dev
 ```
 
@@ -61,24 +61,23 @@ frontend/
 
 - React 18.3.1
 - TypeScript 5.3.3
-- Vite 6.4.1
+- Vite 6.3.5
 - Tailwind CSS 3.4.18
 - Radix UI 组件库
 - Lucide Icons
 
-## 📝 下一步 - 接入后端
+## 📝 已接入后端（自定义参考）
 
-当你准备接入 FastAPI 后端时:
+前端已通过 `src/services/api.ts` 接入 FastAPI 后端（默认 `http://localhost:8000`，可用 `VITE_API_URL` 覆盖）。完整实现见该文件，核心调用模式如下：
 
-1. 创建 API 服务层:
+1. API 服务层（`src/services/api.ts`）:
 ```typescript
-// src/services/api.ts
-export const API_BASE_URL = 'http://localhost:8000';
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-export async function uploadDocument(file: File) {
+export async function uploadInvoice(file: File) {
   const formData = new FormData();
   formData.append('file', file);
-  const response = await fetch(`${API_BASE_URL}/upload`, {
+  const response = await fetch(`${API_BASE_URL}/api/invoice/upload`, {
     method: 'POST',
     body: formData,
   });

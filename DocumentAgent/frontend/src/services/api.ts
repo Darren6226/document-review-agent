@@ -152,7 +152,6 @@ export async function healthCheck(): Promise<any> {
  * 合同概览数据类型
  */
 export interface ContractOverview {
-  contract_id?: string;
   contract_type: string;
   contract_title: string;
   party_a: string;
@@ -202,7 +201,7 @@ export async function uploadContract(file: File): Promise<ContractOverviewRespon
 }
 
 /**
- * 合同审查问题
+ * 合同审查问题（与后端 ContractIssue 对齐，含三重证据链 + 验证状态）
  */
 export interface ContractAuditIssue {
   rule_category: string;
@@ -212,17 +211,43 @@ export interface ContractAuditIssue {
   suggestion: string;
   severity: 'high' | 'medium' | 'low';
   legal_risk: string;
+  // 证据链字段
+  evidence_location: string;
+  rule_id: string;
+  basis_type: 'llm_judgment' | 'deterministic' | 'hybrid';
+  deterministic_ref?: string | null;
+  // 验证状态
+  verified: boolean;
+  verification_note: string;
 }
 
 /**
- * 合同审查结果
+ * 确定性校验结果（与后端 DeterministicFinding 对齐）
+ */
+export interface DeterministicFinding {
+  finding_id: string;
+  rule_id: string;
+  rule_category: string;
+  passed: boolean;
+  field: string;
+  expected?: any;
+  actual?: any;
+  detail: string;
+  location: string;
+  covered_by_llm: boolean;
+}
+
+/**
+ * 合同审查结果（与后端 ContractAuditReport 对齐）
  */
 export interface ContractAuditResult {
-  has_issues: boolean;
+  contract_id: string;
+  contract_type: 'labor' | 'sales' | 'lease' | 'loan' | 'general';
+  validation_time: string;
+  deterministic_findings: DeterministicFinding[];
   issues: ContractAuditIssue[];
-  summary: string;
   overall_risk_level: 'high' | 'medium' | 'low' | 'none';
-  corrected_text: string;
+  summary: string;
 }
 
 /**
@@ -235,11 +260,16 @@ export interface ContractAuditResponse {
 }
 
 /**
- * 审查合同
+ * 审查合同（重新上传文件，与后端 file: UploadFile 签名对齐）
+ * @param file 合同文件
+ * @param rules 可选，选中的审查规则ID列表（如 ["1", "2", "3"]），为空则使用全部规则
  */
-export async function auditContract(contractId: string): Promise<ContractAuditResponse> {
+export async function auditContract(file: File, rules?: string[]): Promise<ContractAuditResponse> {
   const formData = new FormData();
-  formData.append('contract_id', contractId);
+  formData.append('file', file);
+  if (rules && rules.length > 0) {
+    formData.append('rules', JSON.stringify(rules));
+  }
 
   const response = await fetch(`${API_BASE_URL}/api/contract/audit`, {
     method: 'POST',
@@ -252,4 +282,37 @@ export async function auditContract(contractId: string): Promise<ContractAuditRe
   }
 
   return response.json();
+}
+
+// ==================== 历史记录相关 ====================
+
+/**
+ * 历史记录条目类型（与后端 history_store 对齐）
+ */
+export interface HistoryRecord {
+  id: string;
+  type: string;
+  title: string;
+  date: string;
+  status: string;
+  summary: string;
+  risk_level?: string;
+  detail?: any;
+}
+
+/**
+ * 获取全部历史记录
+ */
+export async function getHistory(): Promise<HistoryRecord[]> {
+  const response = await fetch(`${API_BASE_URL}/api/history`, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+    throw new Error(error.detail || `获取历史记录失败: ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  return result.data || [];
 }

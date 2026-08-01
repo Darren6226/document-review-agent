@@ -6,9 +6,10 @@ interface DocumentPreviewProps {
   imageUrl: string;
   onStartReview: () => void;
   isProcessing: boolean;
+  activeMenu?: string;
 }
 
-export function DocumentPreview({ imageUrl, onStartReview, isProcessing }: DocumentPreviewProps) {
+export function DocumentPreview({ imageUrl, onStartReview, isProcessing, activeMenu = '票据审查' }: DocumentPreviewProps) {
   const [zoom, setZoom] = useState(100);
   const [rotation, setRotation] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -63,44 +64,46 @@ export function DocumentPreview({ imageUrl, onStartReview, isProcessing }: Docum
         </div>
 
         {/* 操作按钮 */}
-        <div className="flex gap-3 items-center">
-          <button
-            onClick={handleLocalUpload}
-            className="px-6 py-2.5 bg-gray-600 text-white rounded-xl hover:bg-gray-700 text-sm transition-all duration-300 hover:scale-105 whitespace-nowrap flex items-center gap-2 shadow-lg"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-            本地上传
-          </button>
-          <button
-            onClick={onStartReview}
-            disabled={isProcessing}
-            className="px-6 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 text-sm transition-all duration-300 disabled:bg-gray-500 disabled:cursor-not-allowed hover:scale-105 whitespace-nowrap flex items-center gap-2 shadow-lg"
-          >
-            {isProcessing ? (
-              <>
-                <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                识别中...
-              </>
-            ) : (
-              <>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                开始审查
-              </>
-            )}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf,.doc,.docx,.png,.jpg,.jpeg"
-            className="hidden"
-          />
-        </div>
+        {activeMenu !== '合同审查' && (
+          <div className="flex gap-3 items-center">
+            <button
+              onClick={handleLocalUpload}
+              className="px-6 py-2.5 bg-gray-600 text-white rounded-xl hover:bg-gray-700 text-sm transition-all duration-300 hover:scale-105 whitespace-nowrap flex items-center gap-2 shadow-lg"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+              </svg>
+              本地上传
+            </button>
+            <button
+              onClick={onStartReview}
+              disabled={isProcessing}
+              className="px-6 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 text-sm transition-all duration-300 disabled:bg-gray-500 disabled:cursor-not-allowed hover:scale-105 whitespace-nowrap flex items-center gap-2 shadow-lg"
+            >
+              {isProcessing ? (
+                <>
+                  <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  识别中...
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  开始审查
+                </>
+              )}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.doc,.docx,.png,.jpg,.jpeg"
+              className="hidden"
+            />
+          </div>
+        )}
       </div>
 
       {/* 文档预览区 */}
