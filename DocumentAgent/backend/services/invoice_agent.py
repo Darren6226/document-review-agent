@@ -48,9 +48,51 @@ BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # virtual_mode=True 时：/skills/completeness/SKILL.md -> BACKEND_ROOT/skills/completeness/SKILL.md
 BACKEND = FilesystemBackend(root_dir=BACKEND_ROOT, virtual_mode=True)
 
-# skills 源：传含多维度的父目录 /skills（框架扫描其下的子目录作为各 skill）。
-# 注意：不能传单个 skill 目录（如 /skills/completeness），否则会被扫描为"无子目录"而加载失败。
-SKILLS_SOURCE = ["/skills"]
+# skills 源：框架（deepagents SkillsMiddleware._list_skills）只扫描 source 路径的
+# 「直接子目录」中带 SKILL.md 的目录作为可用 skill。
+# 因此若传 /skills（含 completeness/format/calculation/business 四个子目录），
+# 每个 Sub-Agent 都会被注入全部 4 个 skill 的元数据、并在启动时 download+解析全部 4 个 SKILL.md，
+# 造成无关 token 与解析开销。
+#
+# 优化：为每个维度建一个「单 skill 包装目录」（如 /skills/completeness_only/completeness/SKILL.md），
+# 各 Sub-Agent 只传自己维度的包装目录，从而在 system prompt 只注入本维度 skill 元数据、
+# 只 download+解析本维度 SKILL.md（正文仍由各自写死的 read_file 读取，与 skills 参数无关）。
+# 包装目录内容在模块加载时由 _sync_skill_wrappers() 从真实 skill 目录同步（已存在则跳过），零维护。
+SKILLS_SOURCE = {
+    "completeness": ["/skills/completeness_only"],
+    "format": ["/skills/format_only"],
+    "calculation": ["/skills/calculation_only"],
+    "business": ["/skills/business_only"],
+}
+
+
+def _sync_skill_wrappers() -> None:
+    """把每个真实 skill 目录同步到对应的单 skill 包装目录。
+
+    框架要求 source 下直接子目录含 SKILL.md，故包装目录结构为：
+        /skills/<dim>_only/<dim>/SKILL.md (+ references/)
+    使用 copytree（dirs_exist_ok），仅首次或内容变化时落盘，之后跳过，开销可忽略。
+    """
+    import shutil
+
+    for dim in ("completeness", "format", "calculation", "business"):
+        src = os.path.join(BACKEND_ROOT, "skills", dim)
+        # 包装目录：<skills>/<dim>_only/<dim>/，使 source=/skills/<dim>_only 下恰有一个含 SKILL.md 的子目录
+        wrapper_parent = os.path.join(BACKEND_ROOT, "skills", f"{dim}_only")
+        dst = os.path.join(wrapper_parent, dim)
+        if not os.path.isdir(src):
+            continue
+        os.makedirs(dst, exist_ok=True)
+        # 仅复制 SKILL.md 与 references/（保持与真实 skill 目录内容一致）
+        for entry in ("SKILL.md", "references"):
+            src_entry = os.path.join(src, entry)
+            if not os.path.exists(src_entry):
+                continue
+            dst_entry = os.path.join(dst, entry)
+            if os.path.isdir(src_entry):
+                shutil.copytree(src_entry, dst_entry, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src_entry, dst_entry)
 
 
 # ==================== Sub-Agent 行为契约（system_prompt） ====================
@@ -129,7 +171,7 @@ def _build_subagents(model) -> list[SubAgent]:
             "name": "completeness",
             "description": "发票完整性校验：检查必填字段与建议字段是否齐全。应在其它维度之前优先执行（硬前置）。",
             "system_prompt": COMPLETENESS_PROMPT,
-            "skills": SKILLS_SOURCE,
+            "skills": SKILLS_SOURCE["completeness"],
             "tools": [],
             "model": model,
         },
@@ -137,7 +179,7 @@ def _build_subagents(model) -> list[SubAgent]:
             "name": "format",
             "description": "发票格式校验：验证发票代码/号码/税号/日期/金额的格式。依赖完整性结论，应在完整性之后执行。",
             "system_prompt": FORMAT_PROMPT,
-            "skills": SKILLS_SOURCE,
+            "skills": SKILLS_SOURCE["format"],
             "tools": [],
             "model": model,
         },
@@ -145,7 +187,7 @@ def _build_subagents(model) -> list[SubAgent]:
             "name": "calculation",
             "description": "发票计算校验：验证金额、税额、价税合计计算是否正确，使用 verify_invoice_calculation 工具。可与业务校验并行。",
             "system_prompt": CALCULATION_PROMPT,
-            "skills": SKILLS_SOURCE,
+            "skills": SKILLS_SOURCE["calculation"],
             "tools": [verify_invoice_calculation],
             "model": model,
         },
@@ -153,7 +195,7 @@ def _build_subagents(model) -> list[SubAgent]:
             "name": "business",
             "description": "发票业务规则校验：验证税率合规性、发票类型与字段匹配、金额合理性等业务逻辑。可与计算校验并行。",
             "system_prompt": BUSINESS_PROMPT,
-            "skills": SKILLS_SOURCE,
+            "skills": SKILLS_SOURCE["business"],
             "tools": [],
             "model": model,
         },
@@ -212,13 +254,16 @@ def create_invoice_agent(
     Returns:
         CompiledStateGraph: 配置好的 Deep Agent
     """
-    # 读取配置
+    # 读取配置（发票服务现改用阿里云 DashScope，与合同审核一致，避免硅基流动开源模型编排超时）
+    # 同步单 skill 包装目录，确保各 Sub-Agent 的 skills source 指向只含本维度的目录
+    _sync_skill_wrappers()
+
     if api_key is None:
-        api_key = os.getenv("OPENAI_API_KEY", "")
+        api_key = os.getenv("DASHSCOPE_API_KEY", "")
     if base_url is None:
-        base_url = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
+        base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     if model is None:
-        model = "Qwen/Qwen3.6-27B"
+        model = "qwen3.7-max-2026-05-20"
 
     # 直接创建 ChatOpenAI 实例，使用标准 chat.completions API
     llm = ChatOpenAI(
@@ -228,6 +273,7 @@ def create_invoice_agent(
         temperature=0,
         timeout=120,        # 单次 LLM HTTP 调用最多 120s，避免 hang
         max_retries=2,      # 失败重试 2 次
+        extra_body={"enable_thinking": False},  # 关闭深度思考，避免 thinking 阶段静默超时
     )
 
     agent = create_deep_agent(

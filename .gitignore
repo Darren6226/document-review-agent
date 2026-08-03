@@ -49,10 +49,25 @@ Thumbs.db
 DocumentAgent/backend/uploads/*
 !DocumentAgent/backend/uploads/.gitkeep
 
+# 后端运行时产物（临时/缓存/日志，不纳入版本管理）
+# 单 skill 包装目录（由 invoice_agent._sync_skill_wrappers 自动从 skills/<dim> 同步生成，非源文件）
+DocumentAgent/backend/skills/*_only/
+DocumentAgent/backend/history/_debug.txt
+DocumentAgent/backend/history/*_test.json
+DocumentAgent/backend/history/*.log
+DocumentAgent/backend/logs/
+DocumentAgent/backend/parsed/*
+!DocumentAgent/backend/parsed/.gitkeep
+DocumentAgent/backend/conversation_history/
+DocumentAgent/backend/nul
+DocumentAgent/backend/invoice_extracted.json
+
 # 前端
 node_modules/
 npm-debug.log
 yarn-error.log
+frontend.log
+*.log
 
 # 构建输出
 build/
