@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import uuid
+import time
 import shutil
 import asyncio
 from datetime import datetime
@@ -43,9 +44,56 @@ from services.history_store import save_record, load_records
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# MinerU 解析结果缓存目录：overview 解析出的 markdown 在此缓存，
+# audit 时按 parse_id 复用，避免同一份 PDF 重复调用 MinerU 解析（耗时且耗额度）
+PARSED_CACHE_DIR = Path("./parsed")
+PARSED_CACHE_DIR.mkdir(exist_ok=True)
+
+# 解析缓存有效期（小时）：超过该时长的缓存文件会被后台任务定期清理
+PARSED_CACHE_TTL_HOURS = int(os.getenv("PARSED_CACHE_TTL_HOURS", "24"))
+# 后台清理间隔（秒）：默认每小时清理一次
+PARSED_CACHE_CLEAN_INTERVAL = int(os.getenv("PARSED_CACHE_CLEAN_INTERVAL", "3600"))
+
+
+def _cleanup_parsed_cache():
+    """清理过期的解析缓存文件（超过 PARSED_CACHE_TTL_HOURS 的 *.md）。
+
+    返回被清理的文件数量，用于日志与后台循环统计。
+    """
+    if not PARSED_CACHE_DIR.exists():
+        return 0
+    cutoff = time.time() - PARSED_CACHE_TTL_HOURS * 3600
+    removed = 0
+    try:
+        for f in PARSED_CACHE_DIR.iterdir():
+            if f.is_file() and f.suffix == ".md":
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+    except OSError as e:
+        print(f"[warn] 解析缓存清理失败: {e}")
+    return removed
+
+
+async def _parsed_cache_cleanup_loop():
+    """后台循环任务：周期性清理过期解析缓存。"""
+    import asyncio as _asyncio
+    while True:
+        try:
+            # 启动后立即清理一次，然后按间隔循环
+            removed = await _asyncio.to_thread(_cleanup_parsed_cache)
+            if removed:
+                print(f"[cache] 解析缓存清理：删除 {removed} 个过期文件")
+        except Exception as e:
+            print(f"[warn] 解析缓存清理异常: {e}")
+        await _asyncio.sleep(PARSED_CACHE_CLEAN_INTERVAL)
+
 # API 配置 - 使用硅基流动
-API_KEY = os.getenv("OPENAI_API_KEY", "")
-BASE_URL = "https://api.siliconflow.cn/v1"
+API_KEY = os.getenv("SILICONFLOW_API_KEY", "")
+BASE_URL = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
 
 # ==================== 数据模型 ====================
 
@@ -87,6 +135,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+async def _start_parsed_cache_cleanup():
+    """应用启动时，启动解析缓存的后台清理任务。"""
+    try:
+        task = asyncio.create_task(_parsed_cache_cleanup_loop())
+        # 保存任务引用，避免被 GC 回收（Python < 3.11 需要持有引用）
+        app.state.parsed_cache_cleanup_task = task
+        print(f"[cache] 解析缓存后台清理已启动（TTL={PARSED_CACHE_TTL_HOURS}h，间隔={PARSED_CACHE_CLEAN_INTERVAL}s）")
+    except Exception as e:
+        print(f"[warn] 解析缓存后台清理启动失败: {e}")
+
+
 # 初始化系统
 extraction_system = None
 invoice_agent = None
@@ -101,14 +162,15 @@ if API_KEY:
     except Exception as e:
         print(f"[ERROR] 发票识别系统初始化失败：{e}（/api/invoice/upload 将返回 503）")
 else:
-    print("[WARN] 未设置 OPENAI_API_KEY 环境变量（/api/invoice/upload 将返回 503）")
+    print("[WARN] 未设置 SILICONFLOW_API_KEY 环境变量（/api/invoice/upload 将返回 503）")
 
 # 创建 Deep Agent
+# 注意：发票 Agent 内部默认使用阿里云 DashScope（与合同 Agent 一致），
+# 由 create_invoice_agent 自行从环境变量 DASHSCOPE_API_KEY/DASHSCOPE_BASE_URL 读取，
+# 因此这里**不传 model/api_key/base_url**，避免传入硅基流动格式的模型名导致
+# "Model not exist" 错误（参见历史 bug：c7b1bb52-...）。
 try:
-    invoice_agent = create_invoice_agent(
-        model="Qwen/Qwen3.6-27B",  # 使用硅基流动模型
-        debug=False
-    )
+    invoice_agent = create_invoice_agent(debug=False)
     print("Deep Agent 初始化成功")
 except Exception as e:
     print(f"[ERROR] Deep Agent 初始化失败：{e}（/api/invoice/validate 将返回 503）")
@@ -178,7 +240,7 @@ async def upload_invoice(file: UploadFile = File(...)):
         if not extraction_system:
             raise HTTPException(
                 status_code=503,
-                detail="发票识别系统未初始化：请检查 OPENAI_API_KEY 环境变量是否正确配置"
+                detail="发票识别系统未初始化：请检查 SILICONFLOW_API_KEY 环境变量是否正确配置"
             )
 
         # 执行OCR识别
@@ -229,7 +291,7 @@ def validate_invoice(request: ValidationRequest):
         if not invoice_agent:
             raise HTTPException(
                 status_code=503,
-                detail="发票审查 Agent 未初始化：请检查 OPENAI_API_KEY 及模型配置是否正确"
+                detail="发票审查 Agent 未初始化：请检查 SILICONFLOW_API_KEY 及模型配置是否正确"
             )
 
         # 使用 Deep Agent 执行校验（同步版本，def 端点在独立线程中运行，直接创建新 event loop）
@@ -272,6 +334,9 @@ class ContractOverviewResponse(BaseModel):
     success: bool
     message: str
     data: Optional[Dict[str, Any]] = None
+    # 解析标识：overview 阶段缓存了 MinerU 解析出的 markdown，
+    # audit 时携带该标识即可复用，避免重复解析
+    parse_id: Optional[str] = None
 
 
 class ContractAuditResponse(BaseModel):
@@ -281,16 +346,51 @@ class ContractAuditResponse(BaseModel):
     data: Optional[Dict[str, Any]] = None
 
 
-def _parse_pdf_to_markdown(file_path: Path, filename: str, content_type: str) -> str:
+def _get_parsed_markdown(parse_id: str) -> Optional[str]:
+    """按 parse_id 读取缓存的 markdown 解析结果。
+
+    Args:
+        parse_id: overview 阶段返回的解析标识
+
+    Returns:
+        Optional[str]: 缓存的 markdown 文本；不存在或读取失败返回 None
+    """
+    if not parse_id:
+        return None
+    cache_path = PARSED_CACHE_DIR / f"{parse_id}.md"
+    try:
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8")
+    except Exception as e:
+        print(f"  [warn] 读取解析缓存失败 {parse_id}: {e}")
+    return None
+
+
+def _save_parsed_markdown(parse_id: str, content: str):
+    """把解析出的 markdown 写入缓存，供后续 audit 复用。
+
+    Args:
+        parse_id: 解析标识（MinerU batch_id）
+        content: markdown 文本
+    """
+    try:
+        cache_path = PARSED_CACHE_DIR / f"{parse_id}.md"
+        cache_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        print(f"  [warn] 保存解析缓存失败 {parse_id}: {e}")
+
+
+def _parse_pdf_to_markdown(file_path: Path, filename: str, content_type: str, parse_id: Optional[str] = None) -> tuple[str, str]:
     """使用 MinerU 解析 PDF 为 markdown（合同 overview 和 audit 端点共用）。
 
     Args:
         file_path: 已保存的文件路径
         filename: 原始文件名
         content_type: 文件 MIME 类型
+        parse_id: 可选，指定的解析标识；不传则由 MinerU 返回 batch_id
 
     Returns:
-        str: 解析后的 markdown 文本
+        tuple[str, str]: (解析后的 markdown 文本, 解析标识 parse_id)
     """
     import requests
     import time
@@ -331,6 +431,10 @@ def _parse_pdf_to_markdown(file_path: Path, filename: str, content_type: str) ->
     file_urls = batch_json.get("data", {}).get("file_urls") or []
     if not batch_id or not file_urls:
         raise Exception("MinerU 未返回 batch_id 或上传链接")
+
+    # 使用外部传入的 parse_id（若提供），否则用 MinerU 返回的 batch_id
+    if parse_id:
+        batch_id = parse_id
 
     upload_target = file_urls[0]
     print(f"  获得上传链接: {upload_target}")
@@ -409,7 +513,10 @@ def _parse_pdf_to_markdown(file_path: Path, filename: str, content_type: str) ->
     except Exception:
         pass
 
-    return md_content
+    # 缓存解析结果，供 audit 复用，避免重复解析
+    _save_parsed_markdown(batch_id, md_content)
+
+    return md_content, batch_id
 
 
 @app.post("/api/contract/overview", response_model=ContractOverviewResponse)
@@ -446,8 +553,9 @@ async def get_contract_overview(file: UploadFile = File(...)):
 
         try:
             # 步骤 1: 使用 MinerU 解析 PDF（异步包装避免阻塞事件循环）
+            # 解析结果会写入 PARSED_CACHE_DIR 缓存，parse_id 返回给前端供 audit 复用
             print(f"  步骤 1: 调用 MinerU 解析 PDF...")
-            md_content = await asyncio.to_thread(
+            md_content, parse_id = await asyncio.to_thread(
                 _parse_pdf_to_markdown, file_path, file.filename, file.content_type
             )
 
@@ -467,7 +575,8 @@ async def get_contract_overview(file: UploadFile = File(...)):
             return ContractOverviewResponse(
                 success=True,
                 message="合同信息提取成功",
-                data=contract_info
+                data=contract_info,
+                parse_id=parse_id
             )
 
         except Exception as e:
@@ -494,13 +603,14 @@ async def get_contract_overview(file: UploadFile = File(...)):
 @app.post("/api/contract/audit", response_model=ContractAuditResponse)
 def audit_contract(
     file: UploadFile = File(...),
-    rules: Optional[str] = Form(None)
+    rules: Optional[str] = Form(None),
+    parse_id: Optional[str] = Form(None)
 ):
     """
     上传合同 PDF 并进行专业审核
 
     审核流程（Harness Engineering v2）：
-    1. MinerU 解析 PDF → markdown
+    1. MinerU 解析 PDF → markdown（若携带 parse_id 且缓存命中，则跳过重新解析）
     2. 确定性管线：金额/日期/条款引用/甲乙方名称校验（零 LLM）
     3. 合同类型识别：轻量 LLM 调用
     4. Agent 审核：VFS + Skill + 工具 + Planner 自规划
@@ -515,6 +625,8 @@ def audit_contract(
     Args:
         file: 合同 PDF 文件
         rules: 可选，JSON 格式的规则ID列表（如 '["1","2","3"]'），为空则使用全部规则
+        parse_id: 可选，overview 阶段返回的解析标识。若命中缓存则复用已解析的 markdown，
+            避免同一份 PDF 重复调用 MinerU；未提供或缓存失效时回退为重新解析
     """
     file_path: Optional[Path] = None
     try:
@@ -541,9 +653,17 @@ def audit_contract(
         print(f"正在审核合同: {file_path}")
 
         try:
-            # 步骤 1: MinerU 解析 PDF（同步阻塞调用，requests 库）
-            print(f"  步骤 1: 调用 MinerU 解析 PDF...")
-            md_content = _parse_pdf_to_markdown(file_path, file.filename, file.content_type)
+            # 步骤 1: 获取合同 markdown
+            # 优先复用 overview 阶段缓存的解析结果（parse_id 命中缓存则跳过 MinerU 重复解析）
+            cached_md = _get_parsed_markdown(parse_id) if parse_id else None
+            if cached_md is not None:
+                print(f"  步骤 1: 命中解析缓存（parse_id={parse_id}），跳过 MinerU 解析")
+                md_content = cached_md
+            else:
+                # 未命中缓存则调用 MinerU 解析 PDF（同步阻塞调用，requests 库）
+                print(f"  步骤 1: 调用 MinerU 解析 PDF...")
+                md_content, _parse_id = _parse_pdf_to_markdown(file_path, file.filename, file.content_type)
+                print(f"  步骤 1: 解析完成（parse_id={_parse_id}）")
 
         except Exception as e:
             print(f"MinerU 解析失败: {str(e)}")
@@ -568,25 +688,33 @@ def audit_contract(
 
             report: ContractAuditReport = audit_contract_with_agent_sync(md_content, selected_rules=selected_rules)
 
-            print(f"  审核完成: {report.overall_risk_level} - {report.summary}")
+            print(f"  审核完成: {report.overall_risk_level} - {report.summary}（status={report.status}）")
 
             # 保存历史记录
             try:
                 save_record({
                     "id": str(uuid.uuid4()),
                     "type": "合同审查",
-                    "title": file.filename or "合同文件",
-                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "status": "已完成",
-                    "summary": report.summary,
-                    "risk_level": report.overall_risk_level,
-                    "detail": report.model_dump(),
+                "title": file.filename or "合同文件",
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                # status 反映真实审核状态：success 记为「已完成」，超时/异常记为「未完成」
+                # 供前端历史列表区分展示，避免把不可信的超时记录混入「已完成」列表
+                "status": "已完成" if report.status == "success" else "未完成",
+                "summary": report.summary,
+                # 分析未成功时 risk_level 标记 unknown，避免历史列表误导为「无风险」
+                "risk_level": report.overall_risk_level if report.status == "success" else "unknown",
+                "detail": report.model_dump(),
                 })
             except Exception as e:
                 print(f"[WARN] 保存合同审查历史失败：{e}")
 
+            # 审核未成功完成（超时/异常）时，success 必须反映真实状态，
+            # 不能返回 True 让前端误判为「审核通过」。前端据此区分展示
+            # 「审核未完成，请重试」，避免把不可信结论混入「已完成」列表。
+            audit_ok = report.status == "success"
+
             return ContractAuditResponse(
-                success=True,
+                success=audit_ok,
                 message=f"合同审核完成：{report.summary}",
                 data=report.model_dump()
             )

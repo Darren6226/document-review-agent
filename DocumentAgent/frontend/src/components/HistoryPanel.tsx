@@ -16,6 +16,7 @@ const RISK_STYLES: Record<string, { label: string; className: string }> = {
   medium: { label: '中风险', className: 'text-amber-600' },
   low: { label: '低风险', className: 'text-blue-600' },
   none: { label: '无风险', className: 'text-green-600' },
+  unknown: { label: '不可信', className: 'text-gray-500' },
 };
 
 export function HistoryPanel({ onClose, embedded = false }: HistoryPanelProps) {
@@ -198,10 +199,17 @@ export function HistoryPanel({ onClose, embedded = false }: HistoryPanelProps) {
                     <div className="text-xs text-gray-500 mb-2 line-clamp-2">{item.summary}</div>
                   )}
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-green-600 flex items-center gap-1">
-                      <div className="w-1.5 h-1.5 bg-green-600 rounded-full animate-pulse"></div>
-                      {item.status}
-                    </span>
+                    {item.status === '未完成' ? (
+                      <span className="text-red-600 flex items-center gap-1 font-medium">
+                        <div className="w-1.5 h-1.5 bg-red-600 rounded-full"></div>
+                        未完成 · 请重试
+                      </span>
+                    ) : (
+                      <span className="text-green-600 flex items-center gap-1">
+                        <div className="w-1.5 h-1.5 bg-green-600 rounded-full animate-pulse"></div>
+                        {item.status}
+                      </span>
+                    )}
                     {risk && (
                       <span className={`flex items-center gap-1 ${risk.className}`}>
                         {risk.label}
