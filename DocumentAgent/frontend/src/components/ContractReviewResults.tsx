@@ -1,10 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ContractAuditResult, ContractAuditIssue } from '../services/api';
 
 interface ContractReviewResultsProps {
   onBack: () => void;
   auditResult: ContractAuditResult | null;
   documentUrl?: string | null;
+  // 方案 B：流式实时分析状态
+  streaming?: boolean;
+  liveStage?: string;
+  liveToken?: string;
 }
 
 interface AuditIssue {
@@ -32,10 +36,12 @@ const BASIS_TYPE_LABEL: Record<string, string> = {
   hybrid: '混合判定',
 };
 
-export function ContractReviewResults({ onBack, auditResult, documentUrl }: ContractReviewResultsProps) {
+export function ContractReviewResults({ onBack, auditResult, documentUrl, streaming, liveStage, liveToken }: ContractReviewResultsProps) {
   const [auditResults, setAuditResults] = useState<AuditIssue[]>([]);
   const [activeTab, setActiveTab] = useState<'high' | 'medium' | 'low' | 'pass' | 'unverified'>('high');
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  // 标记是否已经执行过初始自动选中，避免用户手动切换后被 useEffect 重置
+  const initialAutoSetDone = useRef(false);
 
   // 检测是否为PDF文件
   const isPDF = documentUrl?.startsWith('data:application/pdf');
@@ -60,19 +66,23 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
       }));
       setAuditResults(formattedIssues);
 
-      // 自动选择第一个有数据的风险等级
-      const hasHigh = formattedIssues.some(item => item.severity === 'high');
-      const hasMedium = formattedIssues.some(item => item.severity === 'medium');
-      const hasLow = formattedIssues.some(item => item.severity === 'low');
+      // 仅在首次加载数据时自动选择第一个有数据的风险等级，
+      // 防止用户手动切换 tab 后被重复重置
+      if (!initialAutoSetDone.current) {
+        const hasHigh = formattedIssues.some(item => item.severity === 'high');
+        const hasMedium = formattedIssues.some(item => item.severity === 'medium');
+        const hasLow = formattedIssues.some(item => item.severity === 'low');
 
-      if (hasHigh) {
-        setActiveTab('high');
-      } else if (hasMedium) {
-        setActiveTab('medium');
-      } else if (hasLow) {
-        setActiveTab('low');
-      } else {
-        setActiveTab('pass');
+        if (hasHigh) {
+          setActiveTab('high');
+        } else if (hasMedium) {
+          setActiveTab('medium');
+        } else if (hasLow) {
+          setActiveTab('low');
+        } else {
+          setActiveTab('pass');
+        }
+        initialAutoSetDone.current = true;
       }
     }
   }, [auditResult]);
@@ -86,6 +96,18 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
   const lowRiskCount = auditResults.filter(item => item.severity === 'low').length;
   const verifiedCount = auditResults.filter(item => item.verified).length;
   const unverifiedCount = auditResults.length - verifiedCount;
+
+  // 审核是否未成功完成（超时/异常）：此时展示的「暂无问题」不可信，必须告警
+  const auditFailed = auditResult?.status && auditResult.status !== 'success';
+
+  // 纯模板未填检测：确定性校验失败项全部来自"留空待补"占位符（金额/日期完整性），
+  // 且 LLM 未产出任何风险问题，说明这是一份未填写金额的草稿合同
+  const findings = auditResult?.deterministic_findings || [];
+  const detFailed = findings.filter(f => !f.passed);
+  const placeholderCats = new Set(['金额完整性', '日期完整性']);
+  const allPlaceholderFail =
+    detFailed.length > 0 &&
+    detFailed.every(f => placeholderCats.has(f.rule_category));
 
   const filteredResults = activeTab === 'pass'
     ? auditResults.filter(item => item.verified)
@@ -116,6 +138,62 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
 
   return (
     <div className="h-full flex bg-white">
+      {/* 方案 B：流式实时分析面板（审核未完成、尚无完整报告时展示） */}
+      {streaming && !auditResult ? (
+        <>
+          {/* 左侧：文档预览 */}
+          <div className="flex-1 flex flex-col border-r border-gray-200">
+            <div className="h-12 bg-gray-50 border-b border-gray-200 flex items-center justify-between px-4">
+              <button
+                onClick={onBack}
+                className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+                返回
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto bg-gray-50 p-6 flex items-center justify-center">
+              {documentUrl ? (
+                <iframe src={documentUrl} className="w-full h-full border-0 bg-white shadow-sm rounded" title="PDF Preview" />
+              ) : (
+                <span className="text-gray-400 text-sm">文档预览</span>
+              )}
+            </div>
+          </div>
+
+          {/* 右侧：实时分析进度 */}
+          <div className="w-[450px] flex flex-col bg-white">
+            <div className="h-14 bg-white border-b border-gray-200 flex items-center px-6">
+              <span className="flex items-center gap-2 text-sm font-medium text-blue-600">
+                <span className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                风险审查（分析中）
+              </span>
+            </div>
+            <div className="px-6 py-4 bg-blue-50/60 border-b border-blue-100">
+              <div className="flex items-center gap-2 text-sm text-blue-700 font-medium">
+                <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                {liveStage || '正在分析...'}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6">
+              {liveToken ? (
+                <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap bg-gray-50 rounded-lg p-4 border border-gray-200">
+                  {liveToken}
+                  <span className="inline-block w-2 h-4 bg-blue-500 animate-pulse ml-0.5 align-middle" />
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-center text-gray-400">
+                  <div className="w-16 h-16 border-2 border-blue-300 border-t-transparent rounded-full animate-spin mb-4" />
+                  <p className="text-sm">AI 正在阅读并分析合同条款，请稍候...</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      ) : (
+      <>
       {/* 左侧：文档预览 */}
       <div className="flex-1 flex flex-col border-r border-gray-200">
         {/* 顶部工具栏 */}
@@ -181,12 +259,50 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
           <div className="ml-auto w-16"></div>
         </div>
 
+        {/* 分析未完成告警：超时/异常导致结果不可信，必须明确提示用户 */}
+        {auditFailed && (
+          <div className="px-6 py-3 bg-red-50 border-b border-red-200 flex items-start gap-2.5">
+            <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-red-700">
+                {auditResult.status === 'llm_timeout' ? '⚠️ 深度分析超时，本次结论不可信' : '⚠️ 审核未完成，结果不可信'}
+              </div>
+              <div className="text-xs text-red-600 mt-0.5 leading-relaxed">
+                {auditResult.status_message || 'AI 模型未能在规定时间内完成分析。当前显示的「暂无问题」并不代表合同真的没问题。'}
+              </div>
+              <div className="text-xs text-red-600 mt-1 font-medium">
+                建议：请重新上传合同再次发起审核，或检查模型配置后重试。
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 纯模板未填提示：合同未填写金额/日期等占位符，并非实质性条款错误 */}
+        {allPlaceholderFail && (
+          <div className="px-6 py-3 bg-amber-50 border-b border-amber-200 flex items-start gap-2.5">
+            <svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-amber-700">
+                本报告基于未填写金额的草稿合同
+              </div>
+              <div className="text-xs text-amber-600 mt-0.5 leading-relaxed">
+                以上确定性校验的失败项均为金额/日期留空待补，并非实质性条款错误。请在签署前补全所有留空内容后重新审核。
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* 统计标签 */}
         <div className="px-6 py-4 bg-gray-50 border-b border-gray-200">
           <div className="flex items-center gap-2 flex-wrap">
             <button
+              type="button"
               onClick={() => setActiveTab('high')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                 activeTab === 'high'
                   ? 'bg-red-100 text-red-700 border border-red-200'
                   : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
@@ -196,8 +312,9 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
               高风险 ({highRiskCount})
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('medium')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                 activeTab === 'medium'
                   ? 'bg-orange-100 text-orange-700 border border-orange-200'
                   : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
@@ -207,8 +324,9 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
               中风险 ({mediumRiskCount})
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('low')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                 activeTab === 'low'
                   ? 'bg-yellow-100 text-yellow-700 border border-yellow-200'
                   : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
@@ -218,8 +336,9 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
               低风险 ({lowRiskCount})
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('pass')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                 activeTab === 'pass'
                   ? 'bg-green-100 text-green-700 border border-green-200'
                   : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
@@ -230,8 +349,9 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
             </button>
             {unverifiedCount > 0 && (
               <button
+                type="button"
                 onClick={() => setActiveTab('unverified')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                   activeTab === 'unverified'
                     ? 'bg-red-100 text-red-700 border border-red-200'
                     : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
@@ -244,8 +364,8 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
           </div>
         </div>
 
-        {/* 当前分类标题 */}
-        {activeTab !== 'pass' && filteredResults.length > 0 && (
+        {/* 当前分类标题（即使该分类暂无数据也展示，确保切换 tab 有可见反馈） */}
+        {activeTab !== 'pass' && (
           <div className={`px-6 py-2.5 ${getSeverityColor(activeTab)} text-white text-sm font-medium flex items-center gap-2`}>
             <span className="inline-block w-2 h-2 bg-white rounded-sm"></span>
             {getSeverityLabel(activeTab)}
@@ -256,21 +376,38 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
         <div className="flex-1 overflow-y-auto">
           {filteredResults.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-12 px-6">
-              <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mb-4">
-                <svg className="w-10 h-10 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-              <h4 className="text-base font-semibold text-gray-800 mb-2">
-                {activeTab === 'pass' ? '暂无已验证项' : activeTab === 'unverified' ? '暂无未验证项' : '暂无问题'}
-              </h4>
-              <p className="text-sm text-gray-500">
-                {activeTab === 'pass'
-                  ? '当前没有通过验证回路校验的 issue'
-                  : activeTab === 'unverified'
-                    ? '所有 issue 均已通过验证回路校验'
-                    : '该风险等级下没有发现问题'}
-              </p>
+              {auditFailed ? (
+                <>
+                  <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mb-4">
+                    <svg className="w-10 h-10 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                  </div>
+                  <h4 className="text-base font-semibold text-red-700 mb-2">分析未完成，结论不可信</h4>
+                  <p className="text-sm text-red-600">
+                    由于{auditResult.status === 'llm_timeout' ? '模型分析超时' : '审核过程出错'}，本次未生成有效问题列表。
+                    当前没有可展示的审查结果，请重新发起审核。
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mb-4">
+                    <svg className="w-10 h-10 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                  <h4 className="text-base font-semibold text-gray-800 mb-2">
+                    {activeTab === 'pass' ? '暂无已验证项' : activeTab === 'unverified' ? '暂无未验证项' : '暂无问题'}
+                  </h4>
+                  <p className="text-sm text-gray-500">
+                    {activeTab === 'pass'
+                      ? '当前没有通过验证回路校验的 issue'
+                      : activeTab === 'unverified'
+                        ? '所有 issue 均已通过验证回路校验'
+                        : '该风险等级下没有发现问题'}
+                  </p>
+                </>
+              )}
             </div>
           ) : (
             <div>
@@ -422,6 +559,8 @@ export function ContractReviewResults({ onBack, auditResult, documentUrl }: Cont
           )}
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

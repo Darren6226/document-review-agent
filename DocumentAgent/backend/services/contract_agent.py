@@ -226,24 +226,31 @@ def _create_llm(
 ) -> ChatOpenAI:
     """创建合同审核用 LLM（Agent 模式与单次调用模式共用）。
 
-    非推理模型 Qwen2.5-32B-Instruct：72B 的 TPM 配额低（14 次调用即 429），
-    32B 配额宽松且质量足够；Qwen3.6-27B 推理模型 thinking 阶段常 >120s 无 chunk，
-    击穿 stream_chunk_timeout。非推理模型无 thinking，稳定得多。
+    qwen3.7-max 是带深度思考（thinking）的推理模型，thinking 阶段常 >120s 无 chunk，
+    会击穿 stream_chunk_timeout 并被记为「审核未完成」。这里通过
+    extra_body={"enable_thinking": False} 显式关闭深度思考，让模型直接输出结果，
+    既大幅缩短首 token 延迟、避免静默超时，也契合「合同审核要快且确定」的场景。
+    若该接入点不支持该参数会被忽略，不影响其它逻辑。
     """
+    # 读取配置（合同服务使用阿里云 DashScope）
     if api_key is None:
-        api_key = os.getenv("OPENAI_API_KEY", "")
+        api_key = os.getenv("DASHSCOPE_API_KEY", "")
     if base_url is None:
-        base_url = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
+        base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     if model is None:
-        model = "Qwen/Qwen2.5-32B-Instruct"
+        model = "qwen3.7-max-2026-05-20"
     return ChatOpenAI(
         model=model,
         api_key=api_key,
         base_url=base_url,
         temperature=0,
-        timeout=120,                # 单次 HTTP 调用超时
+        # 方案 A：放宽超时上限以容纳长合同
+        # 单次 HTTP 调用总超时从 180s 提到 600s，流式分块超时从 90s 提到 300s，
+        # 避免长合同（300+ 行）在 thinking 关闭后首 token 仍偏慢时被一刀切超时中断。
+        timeout=600,                # 单次 HTTP 调用超时（含等待首 token 的总时长）
         max_retries=3,              # 失败重试 3 次
-        stream_chunk_timeout=60,    # 流式分块超时
+        stream_chunk_timeout=300,   # 流式分块超时（相邻两个 chunk 的最大间隔）
+        extra_body={"enable_thinking": False},  # 关闭深度思考，避免 thinking 阶段静默超时
     )
 
 
@@ -566,7 +573,19 @@ def _build_summary(issues: list[ContractIssue], findings: list[DeterministicFind
     high = len([i for i in issues if i.severity == IssueSeverity.HIGH])
     medium = len([i for i in issues if i.severity == IssueSeverity.MEDIUM])
     low = len([i for i in issues if i.severity == IssueSeverity.LOW])
-    det_fail = len([f for f in findings if not f.passed])
+
+    # 确定性校验失败：按类别聚合，避免把"逐条展开"的条数伪装成"问题数量"
+    # 同时把"留空待填"类（金额/日期完整性）与实质性校验失败分开表述，避免误导
+    det_failed = [f for f in findings if not f.passed]
+    by_category: dict[str, int] = {}
+    for f in det_failed:
+        by_category[f.rule_category] = by_category.get(f.rule_category, 0) + 1
+    det_total = len(findings)
+    det_fail = len(det_failed)
+    # 占位符类的 rule_category 为"金额完整性"/"日期完整性"（见 contract_deterministic.py）
+    placeholder_cats = {"金额完整性", "日期完整性"}
+    placeholder_fail = sum(c for cat, c in by_category.items() if cat in placeholder_cats)
+    substance_fail = det_fail - placeholder_fail
 
     parts = []
     if high:
@@ -575,8 +594,21 @@ def _build_summary(issues: list[ContractIssue], findings: list[DeterministicFind
         parts.append(f"{medium} 个中风险问题")
     if low:
         parts.append(f"{low} 个低风险问题")
+
+    # 确定性校验：仅当存在失败项时，按"类别数 + 条数 + 待补项"结构化表述
     if det_fail:
-        parts.append(f"{det_fail} 项确定性校验失败")
+        cat_desc = "、".join(f"{cat}{c}项" for cat, c in by_category.items())
+        summary = (
+            f"确定性校验 {det_total} 项，失败 {det_fail} 项"
+            f"（涉及 {len(by_category)} 类：{cat_desc}）"
+        )
+        if placeholder_fail:
+            summary += f"，其中待补项（留空未填）{placeholder_fail} 项"
+        # 纯模板未填：所有确定性失败均来自留空占位符（金额/日期完整性），
+        # 弱化提示，避免把"未填写金额的草稿"误判为实质性条款错误
+        if placeholder_fail == det_fail:
+            summary += "。本报告基于未填写金额的草稿合同，上述失败项均为留空待补，并非实质性条款错误"
+        parts.append(summary)
 
     if not parts:
         return "审核通过，未发现问题。"
@@ -599,6 +631,73 @@ def _longest_shared_fragment(a: str, b: str) -> int:
             if a[i:i + w] in b:
                 return w
     return 0
+
+
+def _split_original_fragments(original: str) -> list[str]:
+    """将 LLM 引用的 original 拆分为有信息量的片段。
+
+    背景：LLM 引用表格/跨行内容时，常把多个表格单元格、多行文本拼合成一段
+    （如'二、乙方薪资结算至 年月日；计__元\\n\\n二、_方支付_方经济补偿金__元；'），
+    这些字在原文中都存在，但并非连续子串，导致整段包含匹配失败而误判为幻觉。
+    因此这里按标点/换行拆分，并剔除占位符、纯数字、无中文片段，保留有语义的片段，
+    只要这些片段各自都能在原文中找到，就认为引用已 grounded。
+
+    Args:
+        original: LLM 输出的 original 字段
+
+    Returns:
+        list[str]: 拆分后的语义片段（已去空白/占位符）
+    """
+    if not original:
+        return []
+
+    # 去除占位符（__、_方、_x 等），避免把占位符当语义内容
+    cleaned = re.sub(r'_{1,2}[^_\n，,。；;、：:\s]{0,3}', '', original)
+    # 按标点/换行/空白拆分为片段
+    parts = re.split(r'[\n，,。；;、：:\s]+', cleaned)
+
+    fragments = []
+    for part in parts:
+        p = part.strip()
+        # 过滤：空串、过短（<2字）、无中文（纯数字/符号/占位残留）
+        if len(p) < 2:
+            continue
+        if not re.search(r'[\u4e00-\u9fa5]', p):
+            continue
+        fragments.append(p)
+    return fragments
+
+
+def _is_grounded_by_fragments(original: str, original_text: str) -> tuple[bool, float]:
+    """判断 original 是否由大量可在原文中找到的片段组成。
+
+    用于处理 LLM 引用表格/跨行内容时整段不连续、但关键内容都在原文中的场景，
+    作为「整段包含匹配」失败后的降级验证，避免把真实存在的问题误判为幻觉。
+
+    Args:
+        original: LLM 引用的 original 字段
+        original_text: 合同原文
+
+    Returns:
+        tuple[bool, float]: (是否 grounded，长片段命中率 0-1)
+    """
+    fragments = _split_original_fragments(original)
+    if not fragments:
+        return False, 0.0
+
+    # 只统计有语义的长片段（≥4 字），避免 2-3 字泛词（"乙方"、"金额"等）虚高命中率
+    long_fragments = [f for f in fragments if len(f) >= 4]
+    if not long_fragments:
+        return False, 0.0
+
+    hit = 0
+    for frag in long_fragments:
+        if frag in original_text:
+            hit += 1
+
+    rate = hit / len(long_fragments)
+    # 只要过半长片段都能在原文中找到，即视为引用已 grounded（容忍跨行/表格重组）
+    return rate >= 0.5, rate
 
 
 def verify_issues(
@@ -677,14 +776,27 @@ def verify_issues(
             issue.verified = True
             issue.verification_note = f"原文近似匹配（共有片段 {shared} 字），已容忍小幅改写"
         else:
-            issue.verified = False
-            # LLM 纯判定类 issue 在原文中找不到引用 → 很可能是模型幻觉
-            if issue.basis_type == BasisType.LLM_JUDGMENT:
-                issue.verification_note = f"[幻觉风险] 原文未找到对应内容，可能为模型虚构 | original: {issue.original[:50]}..."
-                # 幻觉 issue 的严重程度不可信，降级为 low
-                issue.severity = IssueSeverity.LOW
+            # 语义定位匹配：LLM 引用表格/跨行内容时整段可能不连续，但关键片段都能在原文中找到，
+            # 此时不应误判为幻觉，也不应降级严重程度。
+            grounded, frag_rate = _is_grounded_by_fragments(issue.original, original_text)
+            if grounded:
+                issue.verified = True
+                issue.verification_note = (
+                    f"关键内容已在原文中逐段定位（长片段命中率 {frag_rate:.0%}），"
+                    f"已容忍表格/跨行导致的文本重组"
+                )
             else:
-                issue.verification_note = f"original 在原文中未找到: {issue.original[:50]}..."
+                issue.verified = False
+                # LLM 纯判定类 issue 在原文中找不到引用 → 很可能是模型幻觉
+                if issue.basis_type == BasisType.LLM_JUDGMENT:
+                    issue.verification_note = (
+                        f"[幻觉风险] 原文未找到对应内容（长片段命中率 {frag_rate:.0%}），"
+                        f"可能为模型虚构 | original: {issue.original[:50]}..."
+                    )
+                    # 幻觉 issue 的严重程度不可信，降级为 low
+                    issue.severity = IssueSeverity.LOW
+                else:
+                    issue.verification_note = f"original 在原文中未找到: {issue.original[:50]}..."
 
     # 2. 查遗漏：确定性 FAIL 项是否被 LLM 覆盖
     failed_findings = [f for f in deterministic_findings if not f.passed]
@@ -727,10 +839,21 @@ def _extract_keywords_from_finding(finding: DeterministicFinding) -> list[str]:
             nums = re.findall(r'[\d,.]+', finding.field)
             keywords.extend(nums)
 
+    elif finding.rule_id == "DETERM.amount_empty":
+        # 金额留空待填的占位符（如"计_元"）
+        keywords.extend(["金额", "未填写", "留空", "待填", "空白", "占位"])
+        if finding.field:
+            # field 形如 "_元"、"计 元"，取"元"前的占位特征词
+            keywords.append(finding.field.replace('_', '').replace(' ', ''))
+
     elif finding.rule_id == "DETERM.date_valid":
         keywords.extend(["日期", "时间", "生效", "到期"])
         if finding.field:
             keywords.append(finding.field)
+
+    elif finding.rule_id == "DETERM.date_empty":
+        # 日期留空待填的占位符（如"年 月 日"）
+        keywords.extend(["日期", "未填写", "留空", "待填", "空白", "占位", "年月日"])
 
     elif finding.rule_id == "DETERM.clause_ref":
         keywords.extend(["条款", "引用", "参照", "详见"])
@@ -848,17 +971,17 @@ def _build_filtered_audit_dimensions(selected_rules: list[str]) -> str:
         "1": "1.1 错别字与形近字检查（形近字、同音字、笔误、多字、漏字）",
         "2": "1.2 标点符号规范性（句号、逗号、顿号、分号、冒号、括号引号配对）",
         "3": "1.3 语法结构检查（主谓宾搭配、成分完整性、避免歧义性表述）",
-        "4": "2.1 法律术语规范性（"违约金"非"罚款"、"解除合同"非"取消合同"）",
+        "4": '2.1 法律术语规范性（“违约金”非“罚款”、“解除合同”非“取消合同”）',
         "5": "2.2 权利义务对等性（甲乙方权利义务明确、对等，避免显失公平）",
         "6": "2.3 金额与数字准确性（大写小写一致、重要金额必须大写+小写）",
-        "7": "2.4 时间条款明确性（合同期限明确、避免"尽快"、"及时"等模糊词）",
+        "7": '2.4 时间条款明确性（合同期限明确、避免"尽快"、"及时"等模糊词）',
         "8": "3.1 条款前后一致性（同一概念表述一致、数字金额一致、甲乙方名称一致）",
         "9": "3.2 条款间逻辑矛盾（不同条款是否矛盾、违约金与赔偿损失关系明确）",
         "10": "3.3 引用条款准确性（条款编号引用准确、附件编号存在、法律法规引用准确）",
         "11": "4.1 法律合规性（是否违反法律强制性规定、是否存在无效条款）",
         "12": "4.2 敏感词汇检查（避免歧视性语言、避免绝对化承诺）",
         "13": "4.3 必备条款完整性（主体信息、标的物、价款、履行期限、违约责任、争议解决）",
-        "14": "5.1 歧义性表述（多义词导致歧义、"和"/"或"/"及"/"与"连接词准确性）",
+        "14": '5.1 歧义性表述（多义词导致歧义、"和"/"或"/"及"/"与"连接词准确性）',
         "15": "5.2 冗余与重复（不必要的重复、冗余修饰语、过长条款）",
     }
 
@@ -934,38 +1057,58 @@ async def _audit_with_single_call(
     skill_content: str,
     type_rule_content: str,
     start_time: float,
-    selected_rules: list[str] = None
+    selected_rules: list[str] = None,
+    on_token: callable = None,
 ) -> list[ContractIssue]:
     """单次 LLM 深度分析：合同全文 + 规则 → issues 列表。
 
     替代 Agent 多轮工具调用，LLM 注意力 100% 集中在条款分析上。
     预期：0 次工具调用，1 次 LLM 调用，~15s 完成。
+
+    方案 B（流式）支持：传入 on_token 回调即可在 LLM 输出每个 chunk 时实时收到，
+    用于前端「正在分析…」的逐步渲染；不传则退化为原来的同步等待模式。
     """
     user_message = _build_single_call_user_message(
         contract_text, contract_type, type_confidence, type_reason,
         deterministic_summary, skill_content, type_rule_content, selected_rules
     )
 
-    print(f"    [single-call] 调用 LLM 单次深度分析...")
+    print(f"    [single-call] 调用 LLM 单次深度分析（stream={'yes' if on_token else 'no'}）...")
+    # 方案 A：单次调用总超时从 180s 放宽到 600s，避免长合同被一刀切中断
     try:
-        # 单次 LLM 调用，带 120s 超时保护
-        response = await asyncio.wait_for(
-            llm.ainvoke([
+        content = ""
+        if on_token is not None:
+            # 流式模式：边收边累积，并实时回调 token
+            async for chunk in llm.astream([
                 {"role": "system", "content": SINGLE_CALL_SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
-            ]),
-            timeout=120
-        )
+            ]):
+                delta = getattr(chunk, "content", "") or ""
+                if delta:
+                    content += delta
+                    on_token(delta)
+        else:
+            response = await asyncio.wait_for(
+                llm.ainvoke([
+                    {"role": "system", "content": SINGLE_CALL_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ]),
+                timeout=600,
+            )
+            content = response.content if hasattr(response, 'content') else str(response)
     except asyncio.TimeoutError:
         elapsed = time.monotonic() - start_time
         print(f"    [single-call] LLM 调用超时（{elapsed:.0f}s）")
-        return []
+        # 超时不是「审核通过」，抛出带原因的信号，由上层标记为 llm_timeout
+        raise TimeoutError(
+            f"LLM 深度分析超时（{elapsed:.0f}s），本次审核结果不可信，请重试或检查模型配置"
+        )
     except Exception as e:
-        print(f"    [single-call] LLM 调用失败: {e}")
-        return []
+        elapsed = time.monotonic() - start_time
+        print(f"    [single-call] LLM 调用失败（{elapsed:.0f}s）: {e}")
+        raise RuntimeError(f"LLM 深度分析调用失败: {e}")
 
     # 解析 LLM 输出
-    content = response.content if hasattr(response, 'content') else str(response)
     data = _extract_first_json(content)
 
     if not data or not isinstance(data, dict):
@@ -1103,13 +1246,34 @@ async def _invoke_agent(text: str, agent, model: str = None, selected_rules: lis
     print("[4/5] 单次 LLM 深度分析中...")
     llm = _create_llm(model=model)
     _start = time.monotonic()
-    issues = await _audit_with_single_call(
-        llm, text, contract_type, confidence, type_reason,
-        det_summary, skill_content, type_rule_content, _start, selected_rules
-    )
-    print(f"  LLM 输出: {len(issues)} 个问题")
+    issues = []
+    audit_status = "success"
+    audit_status_msg = ""
+    try:
+        issues = await _audit_with_single_call(
+            llm, text, contract_type, confidence, type_reason,
+            det_summary, skill_content, type_rule_content, _start, selected_rules
+        )
+        print(f"  LLM 输出: {len(issues)} 个问题")
+    except TimeoutError as e:
+        # LLM 超时：分析未完成，结果不可信，绝不能当成「审核通过」
+        audit_status = "llm_timeout"
+        audit_status_msg = str(e)
+        print(f"  [WARN] 深度分析超时，标记为 llm_timeout：{e}")
+    except Exception as e:
+        audit_status = "error"
+        audit_status_msg = str(e)
+        print(f"  [WARN] 深度分析异常，标记为 error：{e}")
 
     # 组装报告（deterministic_findings 和 validation_time 由代码填充）
+    if audit_status == "success":
+        summary = _build_summary(issues, deterministic_findings)
+    else:
+        # 重要：在 summary 中明确指出「分析未完成」，避免被误解为「合同没问题」
+        summary = (
+            f"⚠️ 审核未完成（{audit_status}）：{audit_status_msg}。"
+            f"当前结论不可信，请重新发起审核。"
+        )
     report = ContractAuditReport(
         contract_id=contract_id,
         contract_type=contract_type,
@@ -1117,7 +1281,9 @@ async def _invoke_agent(text: str, agent, model: str = None, selected_rules: lis
         deterministic_findings=deterministic_findings,
         issues=issues,
         overall_risk_level=_calc_risk_level(issues),
-        summary=_build_summary(issues, deterministic_findings),
+        summary=summary,
+        status=audit_status,
+        status_message=audit_status_msg,
     )
 
     # 步骤 5：验证回路（步骤 7 完整实现）
@@ -1127,8 +1293,14 @@ async def _invoke_agent(text: str, agent, model: str = None, selected_rules: lis
     )
 
     # 更新统计字段
-    report.overall_risk_level = _calc_risk_level(report.issues)
-    report.summary = _build_summary(report.issues, report.deterministic_findings)
+    # 注意：超时/异常（status != success）时绝不覆盖告警 summary 与 risk_level，
+    # 否则会把「分析未完成」重新粉饰成「审核通过，未发现问题」，再次误导用户。
+    if report.status == "success":
+        report.overall_risk_level = _calc_risk_level(report.issues)
+        report.summary = _build_summary(report.issues, report.deterministic_findings)
+    else:
+        # 保持超时/异常告警文案与 status 不变；risk_level 标记 unknown 以反映「不可信」
+        report.overall_risk_level = "unknown"
     report.validation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     # 清理 VFS
@@ -1138,6 +1310,137 @@ async def _invoke_agent(text: str, agent, model: str = None, selected_rules: lis
     print(f"  最终结果: {report.overall_risk_level} - {report.summary}")
 
     return report
+
+
+async def audit_contract_stream(
+    text: str,
+    model: str = None,
+    selected_rules: list[str] = None,
+):
+    """方案 B：流式合同审核生成器（async generator）。
+
+    逐步向外产出事件（JSON 文本行，前端按 SSE/逐行解析）：
+      {"type": "stage",  "stage": "...", "message": "..."}   # 阶段进度
+      {"type": "token",  "content": "..."}                    # LLM 实时增量 token
+      {"type": "done",   "report": {...}}                     # 最终完整报告
+      {"type": "error",  "message": "..."}                    # 致命错误（非 LLM 超时）
+
+    LLM 分析阶段通过 on_token 回调实时推送 token，避免长合同等待期间前端白屏 /
+    误以为卡死；其余阶段（确定性校验、类型识别、验证回路）推送 stage 进度。
+    """
+    import json as _json
+
+    def _emit(obj: dict) -> str:
+        return _json.dumps(obj, ensure_ascii=False)
+
+    # 步骤 1：确定性管线（零 LLM）
+    yield _emit({"type": "stage", "stage": "deterministic", "message": "正在执行确定性校验（金额/日期/条款/甲乙方）..."})
+    deterministic_findings = run_deterministic_audit(text)
+    det_summary = summarize_findings(deterministic_findings)
+    print(f"  确定性校验: {det_summary['total']} 项，通过 {det_summary['passed']}，失败 {det_summary['failed']}")
+
+    # 步骤 2：合同类型识别（轻量 LLM）
+    yield _emit({"type": "stage", "stage": "classify", "message": "正在识别合同类型..."})
+    contract_type, confidence, type_reason = classify_contract(text)
+    print(f"  类型: {contract_type.value}（置信度: {confidence:.0%}）")
+
+    # 步骤 3：合同写入 VFS
+    contract_id, vfs_path = _save_contract_to_vfs(text)
+
+    # 步骤 3.5：预加载规则
+    skill_content = _read_skill_file("SKILL.md") or ""
+    type_rule_file = get_skill_filename(contract_type)
+    type_rule_content = _read_skill_file(type_rule_file) if type_rule_file else ""
+
+    # 步骤 4：单次 LLM 深度分析（流式）
+    # 方案 B：在生成器内直接 astream，每收到一个 chunk 立即 yield token 事件，
+    # 实现前端「实时生成中」的逐步渲染，避免长合同等待时白屏/误判卡死。
+    yield _emit({"type": "stage", "stage": "llm", "message": "AI 正在深度分析合同条款（实时生成中）..."})
+    llm = _create_llm(model=model)
+    _start = time.monotonic()
+    issues = []
+    audit_status = "success"
+    audit_status_msg = ""
+    try:
+        user_message = _build_single_call_user_message(
+            text, contract_type, confidence, type_reason,
+            det_summary, skill_content, type_rule_content, selected_rules
+        )
+        content = ""
+        _buf = ""
+        async for chunk in llm.astream([
+            {"role": "system", "content": SINGLE_CALL_SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]):
+            delta = getattr(chunk, "content", "") or ""
+            if not delta:
+                continue
+            content += delta
+            _buf += delta
+            # 每累积约 24 字 flush 一次，兼顾实时性与传输粒度
+            if len(_buf) >= 24:
+                yield _emit({"type": "token", "content": _buf})
+                _buf = ""
+        if _buf:
+            yield _emit({"type": "token", "content": _buf})
+
+        # 解析 LLM 输出
+        data = _extract_first_json(content)
+        if data and isinstance(data, dict):
+            for issue_data in data.get("issues", []):
+                try:
+                    issues.append(_build_issue(issue_data))
+                except Exception as e:
+                    print(f"    [single-call] 解析 issue 失败: {e}")
+        else:
+            print(f"    [single-call] 无法解析 JSON 输出，原始内容前200字符: {content[:200]}")
+        print(f"  LLM 输出: {len(issues)} 个问题")
+    except TimeoutError as e:
+        audit_status = "llm_timeout"
+        audit_status_msg = str(e)
+        print(f"  [WARN] 深度分析超时，标记为 llm_timeout：{e}")
+    except Exception as e:
+        audit_status = "error"
+        audit_status_msg = str(e)
+        print(f"  [WARN] 深度分析异常，标记为 error：{e}")
+
+    # 组装报告
+    if audit_status == "success":
+        summary = _build_summary(issues, deterministic_findings)
+    else:
+        summary = (
+            f"⚠️ 审核未完成（{audit_status}）：{audit_status_msg}。"
+            f"当前结论不可信，请重新发起审核。"
+        )
+    report = ContractAuditReport(
+        contract_id=contract_id,
+        contract_type=contract_type,
+        validation_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        deterministic_findings=deterministic_findings,
+        issues=issues,
+        overall_risk_level=_calc_risk_level(issues),
+        summary=summary,
+        status=audit_status,
+        status_message=audit_status_msg,
+    )
+
+    # 步骤 5：验证回路
+    yield _emit({"type": "stage", "stage": "verify", "message": "正在执行验证回路（查幻觉/查遗漏）..."})
+    report.issues, report.deterministic_findings = verify_issues(
+        report.issues, text, report.deterministic_findings
+    )
+
+    if report.status == "success":
+        report.overall_risk_level = _calc_risk_level(report.issues)
+        report.summary = _build_summary(report.issues, report.deterministic_findings)
+    else:
+        report.overall_risk_level = "unknown"
+    report.validation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    _cleanup_contract_from_vfs(contract_id)
+
+    # 最终推送完整报告
+    yield _emit({"type": "done", "report": report.model_dump()})
 
 
 # ==================== 测试 ====================
