@@ -58,7 +58,7 @@ npm run preview
 
 1. 前端通过 `src/services/api.ts` 接入 FastAPI 后端（默认 `http://localhost:8000`，可用 `VITE_API_URL` 环境变量覆盖）
 2. 本地开发需在后端启用 CORS（允许 `http://localhost:3000` 来源）
-3. 后端 API 配置（密钥、MinerU 等）详见后端 `README.md` 的「API 配置」章节
+3. 后端 API 配置（密钥、MinerU 等）参见项目根目录 README 或后端 `.env.example`
 
 ## 许可证
 
