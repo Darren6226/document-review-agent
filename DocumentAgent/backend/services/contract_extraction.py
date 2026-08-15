@@ -135,12 +135,12 @@ JSON 格式示例：
 def create_extraction_chain():
     """创建合同信息提取 Chain"""
 
-    # API 配置 - 优先从环境变量读取，支持硅基流动等兼容 OpenAI API 的服务
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
+    # API 配置 - 合同服务使用阿里云 DashScope
+    api_key = os.getenv("DASHSCOPE_API_KEY", "")
+    base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
     if not api_key:
-        raise ValueError("请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY 环境变量")
+        raise ValueError("请设置 DASHSCOPE_API_KEY 环境变量")
 
     # 创建 Prompt
     prompt = ChatPromptTemplate.from_messages([
@@ -151,7 +151,7 @@ def create_extraction_chain():
     # 创建 LLM
     # 注意：硅基流动模型名称格式为 "Qwen/Qwen2.5-7B-Instruct" 等
     llm = ChatOpenAI(
-        model="Qwen/Qwen3.6-27B",
+        model="qwen3.7-max-2026-05-20",
         temperature=0,  # 信息提取需要确定性，温度设为 0
         max_tokens=4000,
         timeout=120,  # 添加超时设置

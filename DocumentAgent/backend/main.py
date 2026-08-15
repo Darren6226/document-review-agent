@@ -20,6 +20,7 @@ from fastapi import Form
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
 from dotenv import load_dotenv
 
@@ -32,7 +33,7 @@ from services.invoice_agent import create_invoice_agent, validate_invoice_with_a
 
 # 导入合同审查模块
 from services.contract_extraction import extract_contract_info_dict, ContractOverview
-from services.contract_agent import audit_contract_with_agent_sync
+from services.contract_agent import audit_contract_with_agent_sync, audit_contract_stream
 from models.validation import ContractAuditReport
 
 # 导入历史记录存储模块
@@ -600,144 +601,118 @@ async def get_contract_overview(file: UploadFile = File(...)):
                 pass
 
 
-@app.post("/api/contract/audit", response_model=ContractAuditResponse)
-def audit_contract(
+@app.post("/api/contract/audit")
+async def audit_contract(
     file: UploadFile = File(...),
     rules: Optional[str] = Form(None),
     parse_id: Optional[str] = Form(None)
 ):
     """
-    上传合同 PDF 并进行专业审核
+    上传合同 PDF 并进行专业审核（方案 B：流式 SSE 响应）。
 
     审核流程（Harness Engineering v2）：
     1. MinerU 解析 PDF → markdown（若携带 parse_id 且缓存命中，则跳过重新解析）
     2. 确定性管线：金额/日期/条款引用/甲乙方名称校验（零 LLM）
     3. 合同类型识别：轻量 LLM 调用
-    4. Agent 审核：VFS + Skill + 工具 + Planner 自规划
+    4. 单次 LLM 深度分析（流式 token 实时推送）
     5. 双向验证回路：查幻觉 + 查遗漏
 
+    响应为 text/event-stream（SSE），逐事件推送：
+      data: {"type":"stage","stage":...,"message":...}
+      data: {"type":"token","content":...}          # LLM 实时增量
+      data: {"type":"done","report":{...}}          # 最终完整报告
+      data: {"type":"error","message":...}          # 解析/致命错误
+
     支持格式: PDF
-
-    实现说明：使用同步端点（def 而非 async def），FastAPI 自动在 threadpool 中执行。
-    这样线程内 asyncio.new_event_loop() 是干净的（无父 loop 引用），
-    避免与 LangGraph 异步资源冲突导致 ainvoke 永久挂起。
-
-    Args:
-        file: 合同 PDF 文件
-        rules: 可选，JSON 格式的规则ID列表（如 '["1","2","3"]'），为空则使用全部规则
-        parse_id: 可选，overview 阶段返回的解析标识。若命中缓存则复用已解析的 markdown，
-            避免同一份 PDF 重复调用 MinerU；未提供或缓存失效时回退为重新解析
     """
     file_path: Optional[Path] = None
+    # 验证文件类型（仅支持 PDF）
+    if file.content_type != 'application/pdf':
+        raise HTTPException(status_code=400, detail="不支持的文件类型，仅支持 PDF 格式的合同文件")
+
+    # 验证文件大小 (20MB)
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+
+    if file_size > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小超过 20MB 限制")
+
+    # 生成唯一文件名
+    unique_filename = f"{uuid.uuid4()}.pdf"
+    file_path = UPLOAD_DIR / unique_filename
+
+    # 保存文件
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    print(f"正在审核合同(流式): {file_path}")
+
+    # 步骤 1: 获取合同 markdown（可能失败，直接抛 HTTPException）
     try:
-        # 验证文件类型（仅支持 PDF）
-        if file.content_type != 'application/pdf':
-            raise HTTPException(status_code=400, detail="不支持的文件类型，仅支持 PDF 格式的合同文件")
-
-        # 验证文件大小 (20MB)
-        file.file.seek(0, 2)
-        file_size = file.file.tell()
-        file.file.seek(0)
-
-        if file_size > 20 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="文件大小超过 20MB 限制")
-
-        # 生成唯一文件名
-        unique_filename = f"{uuid.uuid4()}.pdf"
-        file_path = UPLOAD_DIR / unique_filename
-
-        # 保存文件
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        print(f"正在审核合同: {file_path}")
-
+        cached_md = _get_parsed_markdown(parse_id) if parse_id else None
+        if cached_md is not None:
+            print(f"  步骤 1: 命中解析缓存（parse_id={parse_id}），跳过 MinerU 解析")
+            md_content = cached_md
+        else:
+            print(f"  步骤 1: 调用 MinerU 解析 PDF...")
+            md_content, _parse_id = _parse_pdf_to_markdown(file_path, file.filename, file.content_type)
+            print(f"  步骤 1: 解析完成（parse_id={_parse_id}）")
+    except Exception as e:
+        print(f"MinerU 解析失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"合同解析失败: {str(e)}")
+    finally:
+        # 清理上传的临时文件（解析已完成，后续审核只需文本）
         try:
-            # 步骤 1: 获取合同 markdown
-            # 优先复用 overview 阶段缓存的解析结果（parse_id 命中缓存则跳过 MinerU 重复解析）
-            cached_md = _get_parsed_markdown(parse_id) if parse_id else None
-            if cached_md is not None:
-                print(f"  步骤 1: 命中解析缓存（parse_id={parse_id}），跳过 MinerU 解析")
-                md_content = cached_md
-            else:
-                # 未命中缓存则调用 MinerU 解析 PDF（同步阻塞调用，requests 库）
-                print(f"  步骤 1: 调用 MinerU 解析 PDF...")
-                md_content, _parse_id = _parse_pdf_to_markdown(file_path, file.filename, file.content_type)
-                print(f"  步骤 1: 解析完成（parse_id={_parse_id}）")
+            file_path.unlink()
+        except Exception:
+            pass
 
+    # 解析规则列表
+    selected_rules = None
+    if rules:
+        try:
+            selected_rules = json.loads(rules)
+        except json.JSONDecodeError:
+            print(f"  [WARN] 规则参数解析失败，使用全部规则")
+
+    filename = file.filename or "合同文件"
+
+    async def event_generator_with_history():
+        import json as _json
+        final_report = None
+        try:
+            async for event_str in audit_contract_stream(md_content, selected_rules=selected_rules):
+                evt = _json.loads(event_str)
+                if evt.get("type") == "done":
+                    final_report = evt.get("report")
+                yield f"data: {event_str}\n\n"
         except Exception as e:
-            print(f"MinerU 解析失败: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"合同解析失败: {str(e)}"
-            )
+            print(f"合同审核流式异常: {str(e)}")
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+            return
 
-        try:
-            # 步骤 2-5: 确定性管线 + 类型识别 + Agent 审核 + 验证回路
-            # 函数内部使用 asyncio.new_event_loop + run_until_complete，自带 180s 超时保护
-            print(f"  步骤 2-5: 合同审核（确定性管线 + Agent + 验证回路）...")
-
-            # 解析规则列表
-            selected_rules = None
-            if rules:
-                try:
-                    selected_rules = json.loads(rules)
-                    print(f"  使用自定义规则: {selected_rules}")
-                except json.JSONDecodeError:
-                    print(f"  [WARN] 规则参数解析失败，使用全部规则")
-
-            report: ContractAuditReport = audit_contract_with_agent_sync(md_content, selected_rules=selected_rules)
-
-            print(f"  审核完成: {report.overall_risk_level} - {report.summary}（status={report.status}）")
-
-            # 保存历史记录
+        # 保存历史记录（done 之后）
+        if final_report is not None:
             try:
                 save_record({
                     "id": str(uuid.uuid4()),
                     "type": "合同审查",
-                "title": file.filename or "合同文件",
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                # status 反映真实审核状态：success 记为「已完成」，超时/异常记为「未完成」
-                # 供前端历史列表区分展示，避免把不可信的超时记录混入「已完成」列表
-                "status": "已完成" if report.status == "success" else "未完成",
-                "summary": report.summary,
-                # 分析未成功时 risk_level 标记 unknown，避免历史列表误导为「无风险」
-                "risk_level": report.overall_risk_level if report.status == "success" else "unknown",
-                "detail": report.model_dump(),
+                    "title": filename,
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "status": "已完成" if final_report.get("status") == "success" else "未完成",
+                    "summary": final_report.get("summary", ""),
+                    "risk_level": final_report.get("overall_risk_level") if final_report.get("status") == "success" else "unknown",
+                    "detail": final_report,
                 })
             except Exception as e:
                 print(f"[WARN] 保存合同审查历史失败：{e}")
 
-            # 审核未成功完成（超时/异常）时，success 必须反映真实状态，
-            # 不能返回 True 让前端误判为「审核通过」。前端据此区分展示
-            # 「审核未完成，请重试」，避免把不可信结论混入「已完成」列表。
-            audit_ok = report.status == "success"
-
-            return ContractAuditResponse(
-                success=audit_ok,
-                message=f"合同审核完成：{report.summary}",
-                data=report.model_dump()
-            )
-
-        except Exception as e:
-            print(f"合同审核失败: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"合同审核失败: {str(e)}"
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"合同处理错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"合同处理失败: {str(e)}")
-    finally:
-        # 清理上传的临时文件
-        if file_path is not None:
-            try:
-                file_path.unlink()
-            except Exception:
-                pass
+    return StreamingResponse(
+        event_generator_with_history(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ==================== 历史记录 API ====================

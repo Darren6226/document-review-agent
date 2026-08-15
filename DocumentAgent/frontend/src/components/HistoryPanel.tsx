@@ -1,4 +1,4 @@
-import { X, Search } from 'lucide-react';
+import { X, Search, FileText, Calendar, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { getHistory, HistoryRecord } from '../services/api';
 
@@ -27,6 +27,14 @@ export function HistoryPanel({ onClose, embedded = false }: HistoryPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<'all' | '票据审查' | '合同审查'>('all');
   const [showFilterMenu, setShowFilterMenu] = useState(false);
+  const [detailItem, setDetailItem] = useState<HistoryRecord | null>(null);
+
+  // 判断详情摘要是否需要展开查看
+  const shouldShowDetail = (summary?: string) => {
+    if (!summary) return false;
+    // 按中文/英文大致估算：超过 60 个字符认为需要查看详情
+    return summary.length > 60;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -196,7 +204,20 @@ export function HistoryPanel({ onClose, embedded = false }: HistoryPanelProps) {
                     </button>
                   </div>
                   {item.summary && (
-                    <div className="text-xs text-gray-500 mb-2 line-clamp-2">{item.summary}</div>
+                    <div className="mb-2">
+                      <div className="text-xs text-gray-500 line-clamp-2">{item.summary}</div>
+                      {shouldShowDetail(item.summary) && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDetailItem(item);
+                          }}
+                          className="mt-1 text-xs text-blue-600 hover:text-blue-700 hover:underline font-medium"
+                        >
+                          查看详情
+                        </button>
+                      )}
+                    </div>
                   )}
                   <div className="flex items-center justify-between text-xs">
                     {item.status === '未完成' ? (
@@ -222,6 +243,83 @@ export function HistoryPanel({ onClose, embedded = false }: HistoryPanelProps) {
           </div>
         )}
       </div>
+
+      {/* 详情弹窗 */}
+      {detailItem && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+            onClick={() => setDetailItem(null)}
+          />
+          <div className="relative w-full max-w-lg max-h-[80vh] bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/50 flex flex-col animate-slide-in">
+            {/* 弹窗头部 */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-blue-500" />
+                <h3 className="text-lg font-semibold text-gray-800">审查详情</h3>
+              </div>
+              <button
+                onClick={() => setDetailItem(null)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* 弹窗内容 */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <div className="flex items-center gap-2">
+                <span className="inline-block px-2.5 py-1 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-lg text-xs shadow-md">
+                  {detailItem.type}
+                </span>
+                {detailItem.risk_level && RISK_STYLES[detailItem.risk_level] && (
+                  <span className={`text-sm font-medium ${RISK_STYLES[detailItem.risk_level].className}`}>
+                    {RISK_STYLES[detailItem.risk_level].label}
+                  </span>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-base font-semibold text-gray-900 break-all">{detailItem.title}</h4>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
+                <div className="flex items-center gap-1.5">
+                  <Calendar className="w-4 h-4 text-gray-400" />
+                  <span>{detailItem.date}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {detailItem.status === '未完成' ? (
+                    <AlertCircle className="w-4 h-4 text-red-500" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 text-green-500" />
+                  )}
+                  <span className={detailItem.status === '未完成' ? 'text-red-600 font-medium' : 'text-green-600'}>
+                    {detailItem.status === '未完成' ? '未完成 · 请重试' : detailItem.status}
+                  </span>
+                </div>
+              </div>
+
+              {detailItem.summary && (
+                <div className="bg-gray-50 rounded-xl p-4">
+                  <h5 className="text-sm font-semibold text-gray-700 mb-2">审核摘要</h5>
+                  <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap">{detailItem.summary}</p>
+                </div>
+              )}
+            </div>
+
+            {/* 弹窗底部 */}
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setDetailItem(null)}
+                className="px-5 py-2 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-lg text-sm font-medium shadow-md hover:shadow-lg transition-all duration-300"
+              >
+                知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 

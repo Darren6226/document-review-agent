@@ -27,7 +27,7 @@ flowchart LR
 
 from typing import List, Dict, Any, Optional
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ValidationLevel(str, Enum):
@@ -146,6 +146,38 @@ class ContractIssue(BaseModel):
     verified: bool = Field(default=False, description="是否通过验证回路校验")
     verification_note: str = Field(default="", description="验证说明（未通过时填写原因）")
 
+    @field_validator(
+        "rule_category", "issue_type", "description", "original", "suggestion",
+        "legal_risk", "evidence_location", "rule_id", "verification_note",
+        mode="before"
+    )
+    @classmethod
+    def _normalize_str(cls, v):
+        """数据入口统一兜底：LLM 可能输出 null / 非字符串，直接归一为空串。
+
+        根治此前「legal_risk=null 导致整条 issue 被 pydantic 拒收、最终误判为
+        审核通过」的问题——防御放在模型层，所有调用处（_build_issue 等）无需
+        各自散落兜底逻辑。
+        """
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        return str(v)
+
+    @field_validator("legal_risk", mode="after")
+    @classmethod
+    def _require_legal_risk_for_high(cls, v, info):
+        """业务强约束：severity=high 必须有法律风险说明。
+
+        缺失时不静默丢弃整条 issue，而是给出明确占位告警，让前端/报告能识别
+        「高风险问题但模型未填法律后果」这一异常，而非降级成普通问题。
+        """
+        severity = info.data.get("severity")
+        if severity == IssueSeverity.HIGH and not v.strip():
+            return "（模型未提供法律风险说明，需人工补充分析该 high 问题的法律后果）"
+        return v
+
 
 class DeterministicFinding(BaseModel):
     """确定性校验结果（纯代码判定，零 LLM）"""
@@ -173,6 +205,13 @@ class ContractAuditReport(BaseModel):
 
     overall_risk_level: str = Field(..., description="整体风险等级: high/medium/low/none")
     summary: str = Field(..., description="审核总结")
+
+    # 审核状态：区分「真的没问题」与「分析未成功（如 LLM 超时）」
+    #   success     - 全流程正常完成（含「未发现问题」）
+    #   llm_timeout - 深度分析阶段 LLM 调用超时，结果不可信
+    #   error       - 其它异常导致分析未完成
+    status: str = Field(default="success", description="审核状态: success/llm_timeout/error")
+    status_message: str = Field(default="", description="状态说明（如超时提示），用于前端告警展示")
 
     # 统计属性
     @property

@@ -4,14 +4,13 @@ import { DocumentUpload } from './components/DocumentUpload';
 import { DocumentPreview } from './components/DocumentPreview';
 import { OCRResults } from './components/OCRResults';
 import { ReviewResults } from './components/ReviewResults';
-import { ContractReviewChecklist } from './components/ContractReviewChecklist';
 import { ContractReviewResults } from './components/ContractReviewResults';
 import { HistoryPanel } from './components/HistoryPanel';
 import {
   uploadInvoice,
   validateInvoice,
   uploadContract,
-  auditContract,
+  auditContractStream,
   InvoiceData,
   ValidationReport,
   ContractOverview,
@@ -24,9 +23,13 @@ export default function App() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [ocrData, setOcrData] = useState<InvoiceData | null>(null);
   const [contractData, setContractData] = useState<ContractOverview | null>(null);
+  const [contractParseId, setContractParseId] = useState<string | null>(null);
   const [invoiceId, setInvoiceId] = useState<string | null>(null);
   const [validationReport, setValidationReport] = useState<ValidationReport | null>(null);
   const [contractAuditResult, setContractAuditResult] = useState<ContractAuditResult | null>(null);
+  const [contractStreaming, setContractStreaming] = useState(false);
+  const [contractLiveStage, setContractLiveStage] = useState('');
+  const [contractLiveToken, setContractLiveToken] = useState('');
   const [showReviewResults, setShowReviewResults] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -56,6 +59,8 @@ export default function App() {
         if (response.success && response.data) {
           console.log('Contract Data:', response.data);
           setContractData(response.data);
+          // 保存 overview 阶段的解析标识，audit 时复用已解析的 markdown，避免重复 MinerU 解析
+          setContractParseId(response.parse_id || null);
           setOcrData(null); // 清空发票数据
           setInvoiceId(null);
         } else {
@@ -122,7 +127,7 @@ export default function App() {
   };
 
   const handleStartContractReview = async (selectedRuleIds?: string[]) => {
-    // 合同审查：用保留的原始文件调用后端审核端点（重新上传文件）
+    // 合同审查：用保留的原始文件调用后端审核端点（重新上传文件，方案 B 流式）
     if (!uploadedFile) {
       setError('请先上传合同文件');
       return;
@@ -130,20 +135,37 @@ export default function App() {
 
     setIsProcessing(true);
     setError(null);
+    setContractStreaming(true);
+    setContractLiveStage('正在准备审核...');
+    setContractLiveToken('');
+    setContractAuditResult(null);
+    setShowReviewResults(true); // 提前进入结果页，实时展示分析进度
 
     try {
-      // 调用后端API进行审查（重新上传文件，传入选中的规则ID列表）
-      const response = await auditContract(uploadedFile, selectedRuleIds);
-
-      if (response.success && response.data) {
-        setContractAuditResult(response.data);
-        setShowReviewResults(true);
-      } else {
-        throw new Error(response.message || '审查失败');
-      }
+      await auditContractStream(
+        uploadedFile,
+        (evt) => {
+          if (evt.type === 'stage') {
+            setContractLiveStage(evt.message);
+          } else if (evt.type === 'token') {
+            setContractLiveToken((prev) => prev + evt.content);
+          } else if (evt.type === 'done') {
+            setContractAuditResult(evt.report);
+            setContractLiveStage('');
+            setContractLiveToken('');
+            setContractStreaming(false);
+          } else if (evt.type === 'error') {
+            setError(evt.message || '审查失败');
+            setContractStreaming(false);
+          }
+        },
+        selectedRuleIds,
+        contractParseId ?? undefined
+      );
     } catch (err) {
       console.error('审查失败:', err);
       setError(err instanceof Error ? err.message : '审查失败');
+      setContractStreaming(false);
     } finally {
       setIsProcessing(false);
     }
@@ -154,9 +176,13 @@ export default function App() {
     setUploadedFile(null);
     setOcrData(null);
     setContractData(null);
+    setContractParseId(null);
     setInvoiceId(null);
     setValidationReport(null);
     setContractAuditResult(null);
+    setContractStreaming(false);
+    setContractLiveStage('');
+    setContractLiveToken('');
     setShowReviewResults(false);
     setIsProcessing(false);
     setError(null);
@@ -231,7 +257,14 @@ export default function App() {
             <DocumentUpload onUpload={handleDocumentUpload} activeMenu={activeMenu} />
           ) : showReviewResults ? (
             activeMenu === '合同审查' ? (
-              <ContractReviewResults onBack={handleReset} auditResult={contractAuditResult} documentUrl={uploadedDocument} />
+              <ContractReviewResults
+                onBack={handleReset}
+                auditResult={contractAuditResult}
+                documentUrl={uploadedDocument}
+                streaming={contractStreaming}
+                liveStage={contractLiveStage}
+                liveToken={contractLiveToken}
+              />
             ) : (
               <ReviewResults
                 onBack={handleReset}

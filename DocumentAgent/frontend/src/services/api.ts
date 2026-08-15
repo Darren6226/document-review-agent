@@ -178,6 +178,8 @@ export interface ContractOverviewResponse {
   success: boolean;
   message: string;
   data?: ContractOverview;
+  // overview 阶段缓存的 MinerU 解析标识，audit 时携带以复用已解析的 markdown
+  parse_id?: string;
 }
 
 /**
@@ -248,6 +250,9 @@ export interface ContractAuditResult {
   issues: ContractAuditIssue[];
   overall_risk_level: 'high' | 'medium' | 'low' | 'none';
   summary: string;
+  // 审核状态：success=正常完成；llm_timeout=深度分析超时（结果不可信）；error=其它异常
+  status?: 'success' | 'llm_timeout' | 'error';
+  status_message?: string;
 }
 
 /**
@@ -263,12 +268,17 @@ export interface ContractAuditResponse {
  * 审查合同（重新上传文件，与后端 file: UploadFile 签名对齐）
  * @param file 合同文件
  * @param rules 可选，选中的审查规则ID列表（如 ["1", "2", "3"]），为空则使用全部规则
+ * @param parseId 可选，overview 阶段返回的解析标识。携带后后端可复用已解析的 markdown，
+ *        避免同一份 PDF 重复调用 MinerU 解析
  */
-export async function auditContract(file: File, rules?: string[]): Promise<ContractAuditResponse> {
+export async function auditContract(file: File, rules?: string[], parseId?: string): Promise<ContractAuditResponse> {
   const formData = new FormData();
   formData.append('file', file);
   if (rules && rules.length > 0) {
     formData.append('rules', JSON.stringify(rules));
+  }
+  if (parseId) {
+    formData.append('parse_id', parseId);
   }
 
   const response = await fetch(`${API_BASE_URL}/api/contract/audit`, {
@@ -284,7 +294,70 @@ export async function auditContract(file: File, rules?: string[]): Promise<Contr
   return response.json();
 }
 
-// ==================== 历史记录相关 ====================
+/**
+ * 合同审查事件（SSE 实时推送，与后端 audit_contract_stream 对齐）
+ */
+export type ContractAuditStreamEvent =
+  | { type: 'stage'; stage: string; message: string }
+  | { type: 'token'; content: string }
+  | { type: 'done'; report: ContractAuditResult }
+  | { type: 'error'; message: string };
+
+/**
+ * 流式审查合同（方案 B）：使用 fetch + ReadableStream 逐行解析 SSE，
+ * 通过 onEvent 回调实时把 stage / token / done / error 推给 UI。
+ * 相比一次性返回，能在长合同分析期间实时展示进度，避免白屏/误判卡死。
+ */
+export async function auditContractStream(
+  file: File,
+  onEvent: (evt: ContractAuditStreamEvent) => void,
+  rules?: string[],
+  parseId?: string,
+): Promise<void> {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (rules && rules.length > 0) {
+    formData.append('rules', JSON.stringify(rules));
+  }
+  if (parseId) {
+    formData.append('parse_id', parseId);
+  }
+
+  const response = await fetch(`${API_BASE_URL}/api/contract/audit`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok || !response.body) {
+    const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+    throw new Error(error.detail || `合同审查失败: ${response.statusText}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // 按 SSE 分隔符 "\n\n" 切分完整事件
+    let sepIndex: number;
+    while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+      const raw = buffer.slice(0, sepIndex).trim();
+      buffer = buffer.slice(sepIndex + 2);
+      if (!raw.startsWith('data:')) continue;
+      const payload = raw.slice('data:'.length).trim();
+      if (!payload) continue;
+      try {
+        onEvent(JSON.parse(payload) as ContractAuditStreamEvent);
+      } catch {
+        // 忽略无法解析的片段
+      }
+    }
+  }
+}
 
 /**
  * 历史记录条目类型（与后端 history_store 对齐）

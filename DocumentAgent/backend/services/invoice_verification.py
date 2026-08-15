@@ -206,16 +206,16 @@ class InvoiceExtractionSystem:
         初始化提取系统
 
         Args:
-            api_key: API密钥 (默认从 OPENAI_API_KEY 或 DASHSCOPE_API_KEY 环境变量读取)
-            base_url: API 地址 (默认从 OPENAI_BASE_URL 环境变量读取，其次使用硅基流动地址)
-           model_name: 模型名称
+            api_key: API密钥 (默认从 SILICONFLOW_API_KEY 环境变量读取)
+            base_url: API 地址 (默认从 SILICONFLOW_BASE_URL 环境变量读取)
+            model_name: 模型名称
         """
-        # 从环境变量获取配置
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY", "")
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
-        
+        # 从环境变量获取配置（发票服务使用硅基流动）
+        self.api_key = api_key or os.getenv("SILICONFLOW_API_KEY", "")
+        self.base_url = base_url or os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+
         if not self.api_key:
-            raise ValueError("请设置 OPENAI_API_KEY 或 DASHSCOPE_API_KEY 环境变量")
+            raise ValueError("请设置 SILICONFLOW_API_KEY 环境变量")
         
         self.llm = ChatOpenAI(
            model=model_name,
@@ -344,9 +344,9 @@ class InvoiceExtractionSystem:
 def main():
     """使用示例"""
 
-    # 初始化系统（使用视觉模型识别发票图片）
+    # 初始化系统（使用视觉模型识别发票图片，硅基流动）
     system = InvoiceExtractionSystem(
-        api_key=os.getenv("OPENAI_API_KEY", "your-api-key"),
+        api_key=os.getenv("SILICONFLOW_API_KEY", "your-api-key"),
         model_name="Qwen/Qwen3-VL-32B-Instruct"
     )
 

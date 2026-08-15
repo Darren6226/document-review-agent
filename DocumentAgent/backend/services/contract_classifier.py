@@ -99,14 +99,15 @@ def classify_contract(text: str, llm: Optional[ChatOpenAI] = None) -> tuple[Cont
 
 def _create_llm() -> ChatOpenAI:
     """创建 LLM 实例（轻量配置，类型识别不需要大 token）。"""
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY", "")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
+    # 合同服务使用阿里云 DashScope
+    api_key = os.getenv("DASHSCOPE_API_KEY", "")
+    base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
     if not api_key:
-        raise ValueError("请设置 OPENAI_API_KEY 或 DASHSCOPE_API_KEY 环境变量")
+        raise ValueError("请设置 DASHSCOPE_API_KEY 环境变量")
 
     return ChatOpenAI(
-        model="Qwen/Qwen3.6-27B",
+        model="qwen3.7-max-2026-05-20",
         temperature=0,
         max_tokens=200,  # 类型识别只需要很短的输出
         timeout=30,
